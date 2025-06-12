@@ -2,6 +2,8 @@
 
 A decentralized cross-chain lottery system built with Foundry, implementing Chainlink CCIP for cross-chain communication.
 
+> Note: This is a private repository containing proprietary smart contract code.
+
 ## Foundry
 
 **Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
