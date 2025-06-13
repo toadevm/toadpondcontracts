@@ -275,7 +275,7 @@ contract EnterWithETH is Script {
         console.log("Message:", message);
         
         // Pool information
-        (uint160 sqrtPrice, uint256 bonePerEth, uint256 ethNeeded, bool poolExists) = lottery.getPoolPriceInfo();
+        (, uint256 bonePerEth, uint256 ethNeeded, bool poolExists) = lottery.getPoolPriceInfo();
         console.log("Pool exists:", poolExists);
         console.log("BONE per ETH:", bonePerEth);
         console.log("ETH needed (legacy calc):", ethNeeded);

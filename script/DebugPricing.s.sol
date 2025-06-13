@@ -101,7 +101,7 @@ contract DebugPricing is Script {
         (
             uint160 sqrtPriceX96,
             uint256 bonePerEth,
-            uint256 ethNeededForEntry,
+           ,
             bool poolExists
         ) = lottery.getPoolPriceInfo();
         

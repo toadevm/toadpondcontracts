@@ -68,7 +68,7 @@ contract EnterCrossChainLottery is Script {
             uint256 playerCount,
             uint256 localPrizePool,
             bool winnersReceived,
-            address[3] memory winners,
+            ,
             uint256 totalChainPrizePool
         ) = crossChainLottery.getRoundInfo(crossChainLottery.currentRoundId());
         
@@ -108,7 +108,6 @@ contract EnterCrossChainLottery is Script {
             bool nowHasPending,
             uint256 newTimestamp,
             uint256 newCcipFeePaid,
-            bool nowVerified
         ) = crossChainLottery.getPendingEntry(player);
         
         if (nowHasPending) {
@@ -176,18 +175,14 @@ contract CheckCrossChainStatus is Script {
         // Check player stats
         (
             uint256 totalWon,
-            uint256 participationCount,
-            uint256 points,
+            ,
+            ,
             uint256 pendingAmount,
-            bool hasPendingEntry
         ) = crossChainLottery.getPlayerStats(PLAYER_ADDRESS);
         
         console.log("=== Player Statistics ===");
         console.log("Total won:", totalWon);
-        console.log("Participation count:", participationCount);
-        console.log("Points:", points);
         console.log("Pending withdrawal:", pendingAmount);
-        console.log("Has pending entry:", hasPendingEntry);
         
         // Check current round
         (
@@ -265,10 +260,9 @@ contract WithdrawCrossChain is Script {
         // Check pending withdrawal amount
         (
             uint256 totalWon,
-            uint256 participationCount,
-            uint256 points,
+            ,
+            ,
             uint256 pendingAmount,
-            bool hasPendingEntry
         ) = crossChainLottery.getPlayerStats(player);
         
         console.log("=== Withdrawal Status ===");

@@ -92,7 +92,7 @@ contract DeployCrossChainLottery is Script {
             uint256 playerCount,
             uint256 localPrizePool,
             bool winnersReceived,
-            address[3] memory winners,
+            ,
             uint256 totalChainPrizePool
         ) = crossChainLottery.getRoundInfo(1);
         
@@ -130,10 +130,7 @@ contract DeployCrossChainLottery is Script {
  * @title Helper Contract for Getting Constructor Arguments
  */
 contract GetConstructorArgs is Script {
-    function run() external returns (bytes memory) {
-        // Get the same config to avoid duplication
-        DeployCrossChainLottery deployer = new DeployCrossChainLottery();
-        
+    function run() external pure returns (bytes memory) {
         // Since we can't call getNetworkConfig from here, define inline
         address ccipRouter = 0x449E234FEDF3F907b9E9Dd6BAf1ddc36664097E5 ;
         uint64 sepoliaChainSelector = 16015286601757825753;
