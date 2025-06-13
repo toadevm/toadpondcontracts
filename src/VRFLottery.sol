@@ -56,7 +56,7 @@ contract VRFLottery is
 
     // Game constants
     uint256 public constant ENTRY_FEE_BONE = 1 ether;
-    uint8 public constant MAX_PLAYERS = 4;
+    uint8 public constant MAX_PLAYERS = 4; // Maximum players per round to be modified later (e.g. 10 players)
     uint8 public constant POINTS_PER_ENTRY = 5;
     uint8 public constant WINNERS_SHARE = 60;
     uint8 public constant DEV_SHARE = 5;
