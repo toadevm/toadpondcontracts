@@ -1,6 +1,33 @@
-# ToadPond Cross-Chain Lottery
+# ToadPond Games
 
-A sophisticated decentralized cross-chain lottery system leveraging Chainlink's CCIP (Cross-Chain Interoperability Protocol) and VRF (Verifiable Random Function) for secure, fair, and cross-chain lottery operations.
+A collection of decentralized blockchain games leveraging Chainlink's advanced oracle infrastructure for secure and fair gameplay.
+
+## Projects
+
+### 1. Cross-Chain Lottery
+A sophisticated decentralized cross-chain lottery system using Chainlink's CCIP (Cross-Chain Interoperability Protocol) and VRF (Verifiable Random Function) for secure, fair, and cross-chain lottery operations.
+
+### 2. CoinFlip
+A high-performance, gas-efficient coin flip game with automated token pricing and sophisticated security measures:
+
+- **Gas-Efficient Design**:
+  - Optimized token rate updates using TWAP
+  - 5-minute rate caching to minimize oracle calls
+  - Gas abstraction support for multi-token betting
+  - Packed structs for minimal storage costs
+
+- **Advanced Security**:
+  - Chainlink VRF V2+ for verifiable randomness
+  - Circuit breaker for price volatility protection
+  - Liquidity-based manipulation prevention
+  - TWAP oracle for flash loan resistance
+  - Full reentrancy protection
+
+- **Features**:
+  - Single and batch game creation
+  - Multi-token support with dynamic pricing
+  - Gas abstraction for better UX
+  - Automated winner resolution
 
 ## Technical Overview
 
