@@ -7,8 +7,35 @@ A collection of decentralized blockchain games leveraging Chainlink's advanced o
 ### 1. Cross-Chain Lottery
 A sophisticated decentralized cross-chain lottery system using Chainlink's CCIP (Cross-Chain Interoperability Protocol) and VRF (Verifiable Random Function) for secure, fair, and cross-chain lottery operations.
 
+#### Game Logic
+- Multi-player lottery with up to 4 players per round (expandable to 10)
+- Points system (5 points per entry)
+- Cross-chain participation via CCIP
+- Automatic ETH-to-BONE conversion
+- Local and cross-chain prize distribution
+
+#### Fee Distribution
+- Winners: 60% of the prize pool
+- Development: 5% of fees
+- Funding Pool: 30% of fees
+- Token Burning: 5% of fees sent to dead address
+
 ### 2. CoinFlip
 A high-performance, gas-efficient coin flip game with automated token pricing and sophisticated security measures:
+
+#### Game Logic & Requirements
+- NFT Gating: Must own at least 1 Frog Soup NFT to create or join games
+- Creator chooses Heads or Tails and sets bet amount
+- MEV protection prevents same-block multiple games
+- VRF-powered random outcome generation
+- Supports both single and batch game creation
+- Dynamic token pricing via TWAP oracles
+
+#### Fee Distribution
+- Platform Fee: 5% of each game
+  - Distributed equally among 6 donor addresses
+  - Donors can withdraw their share at any time
+- Winner's Prize: 95% of the game pool
 
 - **Gas-Efficient Design**:
   - Optimized token rate updates using TWAP
