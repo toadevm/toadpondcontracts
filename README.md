@@ -17,7 +17,7 @@ A sophisticated decentralized cross-chain lottery system using Chainlink's CCIP 
 #### Fee Distribution
 - Winners: 60% of the prize pool
 - Development: 5% of fees
-- Funding Pool: 30% of fees
+- Funding Pool: 30% of fees distributed equally among 5 donor addresses
 - Token Burning: 5% of fees sent to dead address
 
 ### 2. CoinFlip
