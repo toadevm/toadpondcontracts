@@ -650,6 +650,7 @@ contract VRFLottery is
         _completeRoundInternal(roundId);
     }
 
+    // To implement uniswap V2 and burn $TOAD instead
     function _completeRoundInternal(uint256 roundId) internal {
         LotteryRound storage round = lotteryRounds[roundId];
         round.state = RoundState.Completed;

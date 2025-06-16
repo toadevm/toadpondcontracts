@@ -173,6 +173,7 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * 5. Add to pending games array for UI discovery
      * 6. Emit event for indexing
      */
+     //To add a require statement of frog soup
     function createGame(
         uint256 amount, 
         address token, 
@@ -235,6 +236,8 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * - Uses memory array to collect ETH requirements
      * - Fails atomically if any game creation fails
      */
+
+     //To add a require statement of frog soup
     function createGamesBatch(
         BatchGameParams[] calldata params,
         address gasToken
@@ -314,6 +317,8 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * 5. Remove from pending games list
      * 6. Request VRF for random coin flip
      */
+
+     //To add a require statement of frog soup
     function joinGame(uint256 gameId, address gasToken) external payable nonReentrant {
         // Load game from storage (single SLOAD for entire struct)
         Game storage game = games[gameId];
