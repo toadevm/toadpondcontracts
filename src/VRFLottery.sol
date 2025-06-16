@@ -48,7 +48,7 @@ contract VRFLottery is
     using PoolIdLibrary for PoolKey;
 
     // ===== CONSTANTS =====
-    address private constant VRF_WRAPPER_ADDRESS = 0x195f15F2d49d693cE265b4fB0fdDbE15b1850Cc1;
+    address private constant VRF_WRAPPER_ADDRESS = 0x29576aB8152A09b9DC634804e4aDE73dA1f3a3CC;
     address public constant POOL_MANAGER = 0xE03A1074c86CFeDd5C142C4F04F1a1536e203543;
     address public constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
     address public constant UNIVERSAL_ROUTER = 0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b;

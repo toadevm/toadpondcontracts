@@ -24,7 +24,9 @@ optimizerSteps = "dhfoDgvulfnTUtnIf[xa[r]EscLMcCTUtTOntnfDIulLculVcul[j]Tpeulxa[
 [rpc_endpoints]
 sepolia = "https://eth-sepolia.g.alchemy.com/v2/Px3T_Ig4x84jGwow8KpaD_UBtM5M-7Ey"
 shibarium_puppynet = "https://puppynet.shibrpc.com"
+arbitrum_sepolia = "https://arb-sepolia.g.alchemy.com/v2/VmvZCtX4lWs4C7E8_FaPDKgMxiqqzXoN"
 mainnet = "https://eth-mainnet.g.alchemy.com/v2/VmvZCtX4lWs4C7E8_FaPDKgMxiqqzXoN"
 
 [etherscan]
 sepolia = { key = "R6RVKKZHA5P19P4HJB6G5QPPDQ4VUERKEZ" }
+arbitrum_sepolia = { key = "WMY2RR82E1HRZDKCEJCTDKTIIJ8MKQF7SH"}
