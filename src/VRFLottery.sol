@@ -48,7 +48,7 @@ contract VRFLottery is
     using PoolIdLibrary for PoolKey;
 
     // ===== CONSTANTS =====
-    address private constant VRF_WRAPPER_ADDRESS = 0x29576aB8152A09b9DC634804e4aDE73dA1f3a3CC;
+    address private constant VRF_WRAPPER_ADDRESS = 0x195f15F2d49d693cE265b4fB0fdDbE15b1850Cc1;
     address public constant POOL_MANAGER = 0xE03A1074c86CFeDd5C142C4F04F1a1536e203543;
     address public constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
     address public constant UNIVERSAL_ROUTER = 0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b;
@@ -532,22 +532,28 @@ contract VRFLottery is
         }
     }
 
-    // ===== VRF AND GAME LOGIC =====
+    // ===== VRF AND GAME LOGIC - FIXED FOR V2.5 =====
 
     function requestRandomWords() external {
         LotteryRound storage round = lotteryRounds[currentRoundId];
         if (round.state != RoundState.Full) revert RoundNotFull();
 
-        uint256 requestPrice = i_vrfV2PlusWrapper.calculateRequestPrice(callbackGasLimit, numWords);
-        if (i_linkToken.balanceOf(address(this)) < requestPrice) {
+        // VRF V2.5 - Simple LINK balance check
+        uint256 linkBalance = i_linkToken.balanceOf(address(this));
+        if (linkBalance < 1 ether) { // Require at least 1 LINK
             revert InsufficientLinkFunds();
         }
+
+        // VRF V2.5 request with LINK payment
+        bytes memory extraArgs = VRFV2PlusClient._argsToBytes(
+            VRFV2PlusClient.ExtraArgsV1({ nativePayment: false }) // Pay with LINK
+        );
 
         (uint256 requestId, ) = requestRandomness(
             callbackGasLimit,
             requestConfirmations,
             numWords,
-            VRFV2PlusClient._argsToBytes(VRFV2PlusClient.ExtraArgsV1({ nativePayment: false }))
+            extraArgs
         );
 
         vrfRequests[requestId] = RequestStatus({ 
@@ -954,7 +960,14 @@ contract VRFLottery is
         bool sufficientFunds
     ) {
         currentLinkBalance = i_linkToken.balanceOf(address(this));
-        estimatedCostPerRequest = i_vrfV2PlusWrapper.calculateRequestPrice(callbackGasLimit, numWords);
+        
+        // VRF V2.5 - Try to get actual price from wrapper
+        try i_vrfV2PlusWrapper.calculateRequestPrice(callbackGasLimit, numWords) returns (uint256 price) {
+            estimatedCostPerRequest = price;
+        } catch {
+            estimatedCostPerRequest = 1.5 * 10**18; // Fallback: 1.5 LINK estimate for V2.5
+        }
+        
         requestsAffordable = estimatedCostPerRequest > 0 ? currentLinkBalance / estimatedCostPerRequest : 0;
         sufficientFunds = currentLinkBalance >= estimatedCostPerRequest;
     }

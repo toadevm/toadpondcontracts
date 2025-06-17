@@ -6,6 +6,7 @@ import {LinkTokenInterface} from "@chainlink/contracts/src/v0.8/shared/interface
 import {VRFV2PlusWrapperConsumerBase} from "@chainlink/contracts/src/v0.8/vrf/dev/VRFV2PlusWrapperConsumerBase.sol";
 import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 // Minimal Uniswap V3 interface for TWAP price calculation
@@ -23,8 +24,13 @@ interface IUniswapV3Pool {
 }
 
 /**
- * @title CoinFlip - Production Ready with Gas-Efficient DEX Oracles
- * @dev Coinflip game with automated token pricing via Uniswap V3 TWAP
+ * @title CoinFlip - Production Ready with Gas-Efficient DEX Oracles, Frog Soup NFT Requirement, and Donor Fee Distribution
+ * @dev Coinflip game with automated token pricing via Uniswap V3 TWAP, NFT gating, and 5% fees distributed to 6 donors
+ * 
+ * REQUIREMENTS:
+ * - Players must own at least 1 Frog Soup NFT to create or join games
+ * - MEV protection prevents same-block multiple games
+ * - 5% platform fees distributed equally among 6 donor addresses
  * 
  * GAS EFFICIENCY STRATEGY:
  * - Updates token rates only when users actually use gas abstraction
@@ -37,6 +43,7 @@ interface IUniswapV3Pool {
  * - Minimum liquidity thresholds prevent manipulation
  * - Reentrancy protection throughout
  * - TWAP prevents flash loan attacks
+ * - NFT requirement prevents bot spam
  */
 contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGuard {
     
@@ -48,6 +55,9 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
     event BatchGameCreated(address indexed creator, uint256[] gameIds);
     event GasAbstractionUsed(address indexed user, address gasToken, uint256 tokenAmount, uint256 ethEquivalent);
     event TokenRateUpdated(address indexed token, uint256 newRate, uint256 timestamp);
+    event FrogSoupNFTUpdated(address indexed oldNFT, address indexed newNFT);
+    event DonorUpdated(uint256 indexed donorIndex, address indexed oldDonor, address indexed newDonor);
+    event DonorWithdrawal(address indexed donor, address indexed token, uint256 amount);
 
     // ============ ENUMS & STRUCTS ============
     
@@ -98,13 +108,18 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
     mapping(uint256 => Game) public games;                    // gameId => Game data
     mapping(uint256 => VRFRequest) public vrfRequests;        // vrfRequestId => VRFRequest
     mapping(address => uint256) public playerPoints;          // player => total points
-    mapping(address => uint256) public collectedFees;         // token => platform fees
+    mapping(address => mapping(address => uint256)) public donorBalances; // donor => token => balance
+    mapping(address => uint256) public playerLastGameBlock;   // player => last game block (MEV protection)
     
     // Gas abstraction with efficient caching
     mapping(address => GasTokenConfig) public gasTokenConfigs; // token => pricing config
     
     uint256 public gameCounter;                               // Incremental game ID
     uint256[] public pendingGameIds;                          // Games awaiting opponents
+    
+    // Donor addresses (6 total)
+    address[6] public donors;                                 // Fixed array of 6 donor addresses
+    uint256 public constant DONOR_COUNT = 6;                 // Number of donors
     
     // VRF configuration
     uint32 public callbackGasLimit = 300000;                 // Gas limit for VRF callback
@@ -117,8 +132,11 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
     address public immutable LINK_TOKEN;
     address public immutable WETH;                           // For DEX pair identification
     
+    // NFT requirement
+    address public FROG_SOUP_NFT;                            // Frog Soup NFT contract address
+    
     // Security and efficiency constants
-    uint256 public constant PLATFORM_FEE_PERCENT = 2;        // 2% platform fee
+    uint256 public constant PLATFORM_FEE_PERCENT = 5;        // 5% platform fee
     uint256 public constant MAX_GAS_PRICE = 100 gwei;        // Prevent gas price manipulation
     uint256 public constant MAX_GAS_COST_TOKENS = 1000000e18; // Max tokens for gas payment
     uint256 public constant MAX_BATCH_SIZE = 10;             // Limit batch operations
@@ -127,6 +145,31 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
     uint256 public constant MIN_RATE = 1e15;                 // 0.001 tokens per ETH min
     uint256 public constant MAX_RATE = 1e25;                 // 10M tokens per ETH max
     uint32 public constant TWAP_PERIOD = 300;                // 5-minute TWAP for responsiveness
+    uint256 public constant MIN_BLOCK_INTERVAL = 1;          // Minimum blocks between games per player
+
+    // ============ MODIFIERS ============
+
+    /**
+     * @dev Modifier to check if user owns required Frog Soup NFT
+     * @param user Address to check NFT ownership for
+     */
+    modifier requiresFrogSoupNFT(address user) {
+        require(_hasFrogSoupNFT(user), "Must own Frog Soup NFT");
+        _;
+    }
+
+    /**
+     * @dev Modifier to prevent MEV attacks and same-block exploitation
+     * @param user Address to check block interval for
+     */
+    modifier enforceBlockInterval(address user) {
+        require(
+            block.number > playerLastGameBlock[user] + MIN_BLOCK_INTERVAL,
+            "Must wait before next game"
+        );
+        playerLastGameBlock[user] = block.number;
+        _;
+    }
 
     // ============ CONSTRUCTOR ============
     
@@ -137,13 +180,17 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * @param _toadToken TOAD token address
      * @param _boneToken BONE token address  
      * @param _weth WETH address for DEX pair identification
+     * @param _frogSoupNFT Frog Soup NFT contract address
+     * @param _donors Array of 6 donor addresses
      */
     constructor(
         address _wrapperAddress,
         address _linkToken,
         address _toadToken,
         address _boneToken,
-        address _weth
+        address _weth,
+        address _frogSoupNFT,
+        address[6] memory _donors
     ) 
         ConfirmedOwner(msg.sender)                            // Inherits ownership functionality
         VRFV2PlusWrapperConsumerBase(_wrapperAddress)         // Inherits VRF functionality
@@ -153,6 +200,16 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
         TOAD_TOKEN = _toadToken;
         BONE_TOKEN = _boneToken;
         WETH = _weth;
+        
+        // Set Frog Soup NFT requirement
+        require(_frogSoupNFT != address(0), "Invalid NFT address");
+        FROG_SOUP_NFT = _frogSoupNFT;
+        
+        // Set donor addresses
+        for (uint256 i = 0; i < DONOR_COUNT; i++) {
+            require(_donors[i] != address(0), "Invalid donor address");
+            donors[i] = _donors[i];
+        }
     }
 
     // ============ MAIN GAME FUNCTIONS ============
@@ -164,63 +221,54 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * @param coinSide true = heads, false = tails
      * @param gasToken Token to pay gas with (address(0) for ETH)
      * @return gameId Unique game identifier
-     * 
-     * EXECUTION FLOW:
-     * 1. Validate inputs and check token whitelist
-     * 2. Handle gas abstraction if requested (updates rates on-demand)
-     * 3. Transfer bet amount from user to contract
-     * 4. Create game struct and store in mapping
-     * 5. Add to pending games array for UI discovery
-     * 6. Emit event for indexing
      */
-     //To add a require statement of frog soup
     function createGame(
         uint256 amount, 
         address token, 
         bool coinSide,
         address gasToken
-    ) external payable nonReentrant returns (uint256 gameId) {
+    ) external payable nonReentrant 
+      requiresFrogSoupNFT(msg.sender)
+      enforceBlockInterval(msg.sender)
+      returns (uint256 gameId) {
+        
         // Input validation
         require(amount > 0, "Amount must be > 0");
         require(_isValidToken(token), "Invalid token");
         
-        // Generate unique game ID (cheaper than using block data)
+        // Generate unique game ID
         gameId = gameCounter++;
         
         // Handle gas abstraction if requested
         if (gasToken != address(0)) {
-            _handleGasAbstraction(gasToken);  // Updates rate cache if needed
+            _handleGasAbstraction(gasToken);
         }
         
         // Handle bet payment based on token type
         if (token == address(0)) {
-            // ETH bet: validate msg.value matches amount
             require(msg.value == amount, "Incorrect ETH amount");
         } else {
-            // Token bet: no ETH should be sent, transfer tokens instead
             require(msg.value == 0, "ETH not needed");
-            // Use transferFrom to pull tokens from user (requires approval)
             require(IERC20(token).transferFrom(msg.sender, address(this), amount), "Transfer failed");
         }
         
         // Create game struct in storage
         games[gameId] = Game({
             creator: msg.sender,
-            joiner: address(0),                               // No opponent yet
+            joiner: address(0),
             amount: amount,
             token: token,
             creatorCoinSide: coinSide,
-            state: GameState.Pending,                         // Waiting for opponent
-            vrfRequestId: 0,                                  // No VRF request yet
-            result: false,                                    // No result yet
-            winner: address(0),                               // No winner yet
-            createdAt: block.timestamp                        // For timeout handling
+            state: GameState.Pending,
+            vrfRequestId: 0,
+            result: false,
+            winner: address(0),
+            createdAt: block.timestamp
         });
         
         // Add to pending games for UI discovery
         pendingGameIds.push(gameId);
         
-        // Emit event for off-chain indexing
         emit GameCreated(gameId, msg.sender, amount, token, coinSide);
     }
 
@@ -229,23 +277,18 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * @param params Array of game parameters
      * @param gasToken Token to pay gas with
      * @return gameIds Array of created game IDs
-     * 
-     * GAS OPTIMIZATION:
-     * - Single gas abstraction call for entire batch
-     * - Validates all parameters before any state changes
-     * - Uses memory array to collect ETH requirements
-     * - Fails atomically if any game creation fails
      */
-
-     //To add a require statement of frog soup
     function createGamesBatch(
         BatchGameParams[] calldata params,
         address gasToken
-    ) external payable nonReentrant returns (uint256[] memory gameIds) {
-        // Validate batch size to prevent gas limit issues
+    ) external payable nonReentrant 
+      requiresFrogSoupNFT(msg.sender)
+      enforceBlockInterval(msg.sender)
+      returns (uint256[] memory gameIds) {
+        
+        // Validate batch size
         require(params.length > 0 && params.length <= MAX_BATCH_SIZE, "Invalid batch size");
         
-        // Initialize return array
         gameIds = new uint256[](params.length);
         uint256 totalEthRequired = 0;
         
@@ -254,21 +297,19 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
             _handleGasAbstraction(gasToken);
         }
         
-        // First pass: validate all parameters and calculate total ETH needed
+        // First pass: validate and calculate ETH needed
         for (uint256 i = 0; i < params.length; i++) {
             require(params[i].amount > 0, "Amount must be > 0");
             require(_isValidToken(params[i].token), "Invalid token");
             
-            // Accumulate ETH requirements
             if (params[i].token == address(0)) {
                 totalEthRequired += params[i].amount;
             }
         }
         
-        // Validate total ETH sent matches requirements
         require(msg.value == totalEthRequired, "Incorrect ETH amount");
         
-        // Second pass: create all games (state changes)
+        // Second pass: create all games
         for (uint256 i = 0; i < params.length; i++) {
             uint256 gameId = gameCounter++;
             gameIds[i] = gameId;
@@ -295,12 +336,10 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
                 createdAt: block.timestamp
             });
             
-            // Add to pending games
             pendingGameIds.push(gameId);
             emit GameCreated(gameId, msg.sender, params[i].amount, params[i].token, params[i].coinSide);
         }
         
-        // Emit batch event for efficient indexing
         emit BatchGameCreated(msg.sender, gameIds);
     }
 
@@ -308,19 +347,11 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * @dev Join an existing game
      * @param gameId Game to join
      * @param gasToken Token to pay gas with
-     * 
-     * EXECUTION FLOW:
-     * 1. Validate game exists and is joinable
-     * 2. Handle gas abstraction if requested
-     * 3. Transfer matching bet amount from joiner
-     * 4. Update game state to WaitingForVRF
-     * 5. Remove from pending games list
-     * 6. Request VRF for random coin flip
      */
-
-     //To add a require statement of frog soup
-    function joinGame(uint256 gameId, address gasToken) external payable nonReentrant {
-        // Load game from storage (single SLOAD for entire struct)
+    function joinGame(uint256 gameId, address gasToken) external payable nonReentrant 
+      requiresFrogSoupNFT(msg.sender)
+      enforceBlockInterval(msg.sender) {
+        
         Game storage game = games[gameId];
         
         // Validate game state
@@ -333,21 +364,19 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
             _handleGasAbstraction(gasToken);
         }
         
-        // Handle bet payment (must match creator's bet exactly)
+        // Handle bet payment
         if (game.token == address(0)) {
-            // ETH game: joiner must send exact ETH amount
             require(msg.value == game.amount, "Incorrect ETH amount");
         } else {
-            // Token game: joiner must transfer exact token amount
             require(msg.value == 0, "ETH not needed");
             require(IERC20(game.token).transferFrom(msg.sender, address(this), game.amount), "Transfer failed");
         }
         
-        // Update game state (multiple storage writes in single transaction)
+        // Update game state
         game.joiner = msg.sender;
         game.state = GameState.WaitingForVRF;
         
-        // Remove from pending games list (gas-optimized removal)
+        // Remove from pending games list
         _removePendingGame(gameId);
         
         // Request randomness from Chainlink VRF
@@ -359,8 +388,6 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
     /**
      * @dev Cancel a pending game (creator only)
      * @param gameId Game to cancel
-     * 
-     * SECURITY: Only creator can cancel, only pending games can be cancelled
      */
     function cancelGame(uint256 gameId) external nonReentrant {
         Game storage game = games[gameId];
@@ -375,38 +402,36 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
         _transferFunds(game.creator, game.amount, game.token);
     }
 
+    // ============ NFT CHECKING FUNCTIONS ============
+
+    /**
+     * @dev Check if user owns Frog Soup NFT
+     * @param user Address to check
+     * @return hasNFT True if user owns at least one Frog Soup NFT
+     */
+    function _hasFrogSoupNFT(address user) internal view returns (bool hasNFT) {
+        require(FROG_SOUP_NFT != address(0), "NFT contract not set");
+        return IERC721(FROG_SOUP_NFT).balanceOf(user) > 0;
+    }
+
     // ============ GAS-EFFICIENT ORACLE SYSTEM ============
 
     /**
      * @dev Handle gas abstraction with intelligent rate caching
      * @param gasToken Token to use for gas payment
-     * 
-     * GAS EFFICIENCY STRATEGY:
-     * 1. Only update rate if cache has expired (saves ~13k gas on cache hits)
-     * 2. Use 5-minute cache duration for good responsiveness vs efficiency
-     * 3. Single storage update when rate changes
-     * 4. Circuit breaker prevents extreme price manipulation
      */
     function _handleGasAbstraction(address gasToken) internal {
-        // Security: prevent gas price manipulation
         require(tx.gasprice <= MAX_GAS_PRICE, "Gas price too high");
         
-        // Get current token rate (updates cache if needed)
         uint256 tokenRate = _getTokenRateWithCache(gasToken);
-        
-        // Calculate gas cost in ETH
         uint256 gasEstimate = tx.gasprice * gasleft();
-        
-        // Convert ETH cost to token amount using current rate
         uint256 tokenAmount = (gasEstimate * tokenRate) / 1e18;
         
         // Add 10% buffer for gas estimation variance
         tokenAmount = (tokenAmount * 110) / 100;
         
-        // Security cap to prevent contract drainage
         require(tokenAmount <= MAX_GAS_COST_TOKENS, "Gas cost too high");
         
-        // Transfer tokens from user (single external call)
         require(
             IERC20(gasToken).transferFrom(msg.sender, address(this), tokenAmount),
             "Gas token transfer failed"
@@ -419,30 +444,21 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * @dev Get token rate with intelligent caching
      * @param token Token address
      * @return rate Current token rate (tokens per ETH)
-     * 
-     * CACHING STRATEGY:
-     * - Cache hit: ~2,100 gas (SLOAD)
-     * - Cache miss: ~15,000 gas (SLOAD + external calls + SSTORE)
-     * - Cache valid for 5 minutes (good balance of accuracy vs efficiency)
      */
     function _getTokenRateWithCache(address token) internal returns (uint256 rate) {
-        // Load config from storage (single SLOAD for packed struct)
         GasTokenConfig storage config = gasTokenConfigs[token];
         require(config.isSupported, "Token not supported");
         
-        // Check cache validity
         uint256 timeSinceUpdate = block.timestamp - config.lastUpdate;
         bool cacheValid = (
-            config.cachedRate > 0 &&                         // Has cached rate
-            timeSinceUpdate < config.updateInterval           // Cache not expired
+            config.cachedRate > 0 &&
+            timeSinceUpdate < config.updateInterval
         );
         
         if (cacheValid) {
-            // Cache hit: return cached rate (cheap)
             return uint256(config.cachedRate);
         }
         
-        // Cache miss: calculate fresh rate from DEX
         uint256 freshRate = _calculateDEXRate(config);
         
         // Circuit breaker: prevent extreme price changes
@@ -451,16 +467,13 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
                 ? ((freshRate - config.lastValidPrice) * 100) / config.lastValidPrice
                 : ((config.lastValidPrice - freshRate) * 100) / config.lastValidPrice;
                 
-            // If change is extreme, use last valid price
             if (priceChange > MAX_PRICE_CHANGE) {
                 freshRate = config.lastValidPrice;
             }
         }
         
-        // Validate rate is within reasonable bounds
         require(freshRate >= MIN_RATE && freshRate <= MAX_RATE, "Invalid rate");
         
-        // Update cache (single SSTORE for packed struct)
         config.cachedRate = uint128(freshRate);
         config.lastUpdate = uint64(block.timestamp);
         config.lastValidPrice = freshRate;
@@ -474,32 +487,21 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * @dev Calculate token rate from Uniswap V3 DEX
      * @param config Token configuration with pool address
      * @return rate Calculated rate (tokens per ETH)
-     * 
-     * DEX ORACLE PROCESS:
-     * 1. Check pool has sufficient liquidity (prevents manipulation)
-     * 2. Get 5-minute TWAP from Uniswap V3 (balances responsiveness vs manipulation resistance)
-     * 3. Convert tick to price using simplified math
-     * 4. Return tokens per ETH rate
      */
     function _calculateDEXRate(GasTokenConfig storage config) internal view returns (uint256) {
         IUniswapV3Pool pool = IUniswapV3Pool(config.dexPool);
         
-        // Security: ensure pool has sufficient liquidity
         require(pool.liquidity() >= config.minLiquidity, "Insufficient DEX liquidity");
         
-        // Get TWAP data from Uniswap V3
         uint32[] memory secondsAgos = new uint32[](2);
-        secondsAgos[0] = TWAP_PERIOD;  // 5 minutes ago
-        secondsAgos[1] = 0;            // Current time
+        secondsAgos[0] = TWAP_PERIOD;
+        secondsAgos[1] = 0;
         
-        // Query cumulative tick data (this is where TWAP magic happens)
         (int56[] memory tickCumulatives,) = pool.observe(secondsAgos);
         
-        // Calculate time-weighted average tick
         int56 tickCumulativesDelta = tickCumulatives[1] - tickCumulatives[0];
         int24 averageTick = int24(tickCumulativesDelta / int56(uint56(TWAP_PERIOD)));
         
-        // Convert tick to price ratio
         return _tickToPrice(averageTick, config.token0IsWETH);
     }
 
@@ -508,40 +510,26 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * @param tick Average tick from TWAP
      * @param token0IsWETH Whether WETH is token0 in the pool
      * @return price Token amount per 1 ETH
-     * 
-     * SIMPLIFIED TICK MATH:
-     * - Uniswap V3 uses ticks to represent price ratios
-     * - Each tick represents a 0.01% price change
-     * - This is a simplified version - production should use Uniswap's TickMath library
      */
     function _tickToPrice(int24 tick, bool token0IsWETH) internal pure returns (uint256) {
-        // Handle negative ticks
         bool isNegative = tick < 0;
         uint256 absTick = isNegative ? uint256(-int256(tick)) : uint256(int256(tick));
         
-        // Simplified calculation: approximately 1.0001^tick
-        // Production should use Uniswap's TickMath.getSqrtRatioAtTick()
         uint256 price = 1e18;
         
-        // Linear approximation for small ticks (good enough for 5-minute changes)
         if (absTick < 1000) {
-            price = 1e18 + (absTick * 1e14); // ~0.01% per tick
+            price = 1e18 + (absTick * 1e14);
         } else {
-            // For larger ticks, use exponential approximation
             price = 1e18 * (1000 + absTick) / 1000;
         }
         
-        // Handle negative ticks (price decrease)
         if (isNegative) {
             price = 1e36 / price;
         }
         
-        // Adjust for token position in pool
         if (token0IsWETH) {
-            // WETH is token0: return token1 per WETH
             return price;
         } else {
-            // Token is token0: return token per WETH (invert ratio)
             return 1e36 / price;
         }
     }
@@ -551,24 +539,19 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
     /**
      * @dev Request randomness from Chainlink VRF
      * @param gameId Game needing randomness
-     * 
-     * VRF COST: ~0.25 LINK per request (contract must hold sufficient LINK)
      */
     function _requestVRF(uint256 gameId) internal {
-        // Configure VRF request
         bytes memory extraArgs = VRFV2PlusClient._argsToBytes(
-            VRFV2PlusClient.ExtraArgsV1({nativePayment: false}) // Pay with LINK only
+            VRFV2PlusClient.ExtraArgsV1({nativePayment: false})
         );
         
-        // Request randomness (this costs LINK tokens)
         (uint256 requestId,) = requestRandomness(
-            callbackGasLimit,        // Gas limit for callback function
-            requestConfirmations,    // Block confirmations to wait
-            numWords,               // Number of random numbers (1)
-            extraArgs               // Payment configuration
+            callbackGasLimit,
+            requestConfirmations,
+            numWords,
+            extraArgs
         );
         
-        // Store VRF request details
         games[gameId].vrfRequestId = requestId;
         vrfRequests[requestId] = VRFRequest({
             gameId: gameId,
@@ -580,65 +563,49 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * @dev Chainlink VRF callback - resolves game when randomness received
      * @param requestId VRF request identifier
      * @param randomWords Array of random numbers from Chainlink
-     * 
-     * GAME RESOLUTION PROCESS:
-     * 1. Validate VRF request is legitimate and not already fulfilled
-     * 2. Convert random number to coin flip result (even = heads, odd = tails)
-     * 3. Determine winner based on creator's choice vs actual result
-     * 4. Award points to both players (2 points each)
-     * 5. Calculate payouts (winner gets pot minus 2% platform fee)
-     * 6. Transfer winnings to winner
-     * 7. Track platform fees
-     * 
-     * GAS OPTIMIZATION:
-     * - All state updates before external call (reentrancy safety)
-     * - Single external call at end
-     * - Efficient event emission
      */
     function fulfillRandomWords(uint256 requestId, uint256[] memory randomWords) internal override nonReentrant {
-        // Load VRF request data
         VRFRequest storage vrfRequest = vrfRequests[requestId];
         uint256 gameId = vrfRequest.gameId;
         
-        // Validate VRF request
         require(gameId != 0, "Invalid VRF request");
         require(!vrfRequest.fulfilled, "Request already fulfilled");
         
-        // Load game data
         Game storage game = games[gameId];
         require(game.creator != address(0), "Game does not exist");
         require(game.state == GameState.WaitingForVRF, "Game not waiting for VRF");
         
-        // Mark as fulfilled first (reentrancy protection)
         vrfRequest.fulfilled = true;
         
-        // Determine coin flip result: even random number = heads, odd = tails
+        // Determine coin flip result: even = heads, odd = tails
         bool coinResult = randomWords[0] % 2 == 0;
         
-        // Determine winner: does creator's choice match result?
+        // Determine winner
         address winner = game.creatorCoinSide == coinResult ? game.creator : game.joiner;
         
-        // Update all game state before external calls (gas efficient + secure)
+        // Update game state
         game.result = coinResult;
         game.state = GameState.Resolved;
         game.winner = winner;
         
-        // Award participation points to both players
+        // Award participation points
         playerPoints[game.creator] += 2;
         playerPoints[game.joiner] += 2;
         
         // Calculate payouts
-        uint256 totalPot = game.amount * 2;                           // Both players' bets
-        uint256 platformFee = (totalPot * PLATFORM_FEE_PERCENT) / 100; // 2% platform fee
-        uint256 winnerPayout = totalPot - platformFee;                // Winner gets the rest
+        uint256 totalPot = game.amount * 2;
+        uint256 platformFee = (totalPot * PLATFORM_FEE_PERCENT) / 100;
+        uint256 winnerPayout = totalPot - platformFee;
         
-        // Track platform fees for later withdrawal
-        collectedFees[game.token] += platformFee;
+        // Distribute platform fee equally among 6 donors
+        uint256 feePerDonor = platformFee / DONOR_COUNT;
+        for (uint256 i = 0; i < DONOR_COUNT; i++) {
+            donorBalances[donors[i]][game.token] += feePerDonor;
+        }
         
-        // Emit resolution event
         emit GameResolved(gameId, winner, coinResult);
         
-        // Transfer winnings (external call last for reentrancy safety)
+        // Transfer winnings
         _transferFunds(winner, winnerPayout, game.token);
     }
 
@@ -649,18 +616,12 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * @param to Recipient address
      * @param amount Amount to transfer
      * @param token Token address (address(0) for ETH)
-     * 
-     * GAS OPTIMIZATION:
-     * - Uses low-level call for ETH (more efficient than transfer())
-     * - Single external call per transfer
      */
     function _transferFunds(address to, uint256 amount, address token) internal {
         if (token == address(0)) {
-            // ETH transfer using low-level call
             (bool success,) = payable(to).call{value: amount}("");
             require(success, "ETH transfer failed");
         } else {
-            // Token transfer
             require(IERC20(token).transfer(to, amount), "Token transfer failed");
         }
     }
@@ -668,20 +629,13 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
     /**
      * @dev Remove game from pending games array (gas-optimized)
      * @param gameId Game to remove
-     * 
-     * GAS OPTIMIZATION:
-     * - Uses swap-and-pop technique for O(1) removal
-     * - Avoids shifting array elements (expensive)
      */
     function _removePendingGame(uint256 gameId) internal {
         uint256 length = pendingGameIds.length;
         
-        // Find and remove game ID
         for (uint256 i = 0; i < length; i++) {
             if (pendingGameIds[i] == gameId) {
-                // Move last element to current position
                 pendingGameIds[i] = pendingGameIds[length - 1];
-                // Remove last element
                 pendingGameIds.pop();
                 break;
             }
@@ -720,20 +674,76 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
     }
 
     /**
+     * @dev Check if user can create/join games (has required Frog Soup NFT)
+     * @param user Address to check
+     * @return canPlay True if user owns Frog Soup NFT
+     */
+    function canUserPlay(address user) external view returns (bool canPlay) {
+        return _hasFrogSoupNFT(user);
+    }
+
+    /**
+     * @dev Get user's Frog Soup NFT balance
+     * @param user User address
+     * @return balance Number of Frog Soup NFTs owned
+     */
+    function getUserFrogSoupBalance(address user) external view returns (uint256 balance) {
+        require(FROG_SOUP_NFT != address(0), "NFT contract not set");
+        return IERC721(FROG_SOUP_NFT).balanceOf(user);
+    }
+
+    /**
+     * @dev Check when user can create their next game
+     * @param user User address
+     * @return blockNumber Block number when user can play again
+     * @return canPlayNow True if user can play immediately
+     */
+    function getUserNextGameBlock(address user) external view returns (uint256 blockNumber, bool canPlayNow) {
+        uint256 nextBlock = playerLastGameBlock[user] + MIN_BLOCK_INTERVAL + 1;
+        return (nextBlock, block.number >= nextBlock);
+    }
+
+    /**
+     * @dev Get donor balance for specific token
+     * @param donor Donor address
+     * @param token Token address (address(0) for ETH)
+     * @return balance Amount available for withdrawal
+     */
+    function getDonorBalance(address donor, address token) external view returns (uint256 balance) {
+        return donorBalances[donor][token];
+    }
+
+    /**
+     * @dev Get all donor addresses
+     * @return donorList Array of 6 donor addresses
+     */
+    function getDonors() external view returns (address[6] memory donorList) {
+        return donors;
+    }
+
+    /**
+     * @dev Check if address is a donor
+     * @param addr Address to check
+     * @return isValidDonor True if address is one of the 6 donors
+     */
+    function isDonor(address addr) external view returns (bool isValidDonor) {
+        for (uint256 i = 0; i < DONOR_COUNT; i++) {
+            if (donors[i] == addr) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * @dev Get current gas token rate (view function - doesn't update cache)
      * @param token Token address
      * @return rate Current rate, either cached or freshly calculated
-     * 
-     * VIEW FUNCTION BEHAVIOR:
-     * - Returns cached rate if still valid (within update interval)
-     * - Calculates fresh rate if cache expired (doesn't update storage)
-     * - Used by frontend to display current rates without triggering updates
      */
     function getGasTokenRate(address token) external view returns (uint256 rate) {
         GasTokenConfig storage config = gasTokenConfigs[token];
         require(config.isSupported, "Token not supported");
         
-        // Check if cached rate is still valid
         uint256 timeSinceUpdate = block.timestamp - config.lastUpdate;
         bool cacheValid = (
             config.cachedRate > 0 &&
@@ -741,11 +751,9 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
         );
         
         if (cacheValid) {
-            // Return cached rate
             return uint256(config.cachedRate);
         }
         
-        // Calculate fresh rate (view-only, no storage updates)
         return _calculateDEXRate(config);
     }
 
@@ -783,19 +791,12 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * @param gasToken Token to pay with
      * @param ethAmount ETH amount in wei
      * @return tokenAmount Token amount needed (including 10% buffer)
-     * 
-     * FRONTEND USAGE: Estimate gas costs before user submits transaction
      */
     function calculateGasCost(address gasToken, uint256 ethAmount) external view returns (uint256 tokenAmount) {
         require(gasTokenConfigs[gasToken].isSupported, "Token not supported");
         
-        // Get current rate (view function)
         uint256 rate = this.getGasTokenRate(gasToken);
-        
-        // Convert ETH to token amount
         tokenAmount = (ethAmount * rate) / 1e18;
-        
-        // Add 10% buffer for estimation variance
         tokenAmount = (tokenAmount * 110) / 100;
     }
 
@@ -803,17 +804,82 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * @dev Estimate gas needed for VRF callback based on game token
      * @param gameToken Token used in the game
      * @return estimatedGas Gas estimate for callback
-     * 
-     * GAS ESTIMATES:
-     * - ETH games: ~150,000 gas (simpler transfers)
-     * - Token games: ~250,000 gas (more complex ERC20 transfers)
      */
     function estimateCallbackGas(address gameToken) external pure returns (uint256 estimatedGas) {
         return gameToken == address(0) ? 150000 : 250000;
     }
 
+    // ============ DONOR WITHDRAWAL FUNCTIONS ============
+
+    /**
+     * @dev Withdraw fees for individual donor
+     * @param token Token to withdraw (address(0) for ETH)
+     */
+    function withdrawDonorFees(address token) external nonReentrant {
+        uint256 amount = donorBalances[msg.sender][token];
+        require(amount > 0, "No fees to withdraw");
+        
+        donorBalances[msg.sender][token] = 0;
+        
+        _transferFunds(msg.sender, amount, token);
+        
+        emit DonorWithdrawal(msg.sender, token, amount);
+    }
+
+    /**
+     * @dev Batch withdraw multiple tokens for donor
+     * @param tokens Array of token addresses to withdraw
+     */
+    function withdrawDonorFeesBatch(address[] calldata tokens) external nonReentrant {
+        require(tokens.length > 0 && tokens.length <= 10, "Invalid token count");
+        
+        for (uint256 i = 0; i < tokens.length; i++) {
+            uint256 amount = donorBalances[msg.sender][tokens[i]];
+            if (amount > 0) {
+                donorBalances[msg.sender][tokens[i]] = 0;
+                
+                _transferFunds(msg.sender, amount, tokens[i]);
+                
+                emit DonorWithdrawal(msg.sender, tokens[i], amount);
+            }
+        }
+    }
+
     // ============ OWNER FUNCTIONS ============
     
+    /**
+     * @dev Update donor address (owner only)
+     * @param donorIndex Index of donor to update (0-5)
+     * @param newDonor New donor address
+     */
+    function updateDonor(uint256 donorIndex, address newDonor) external onlyOwner {
+        require(donorIndex < DONOR_COUNT, "Invalid donor index");
+        require(newDonor != address(0), "Invalid donor address");
+        
+        address oldDonor = donors[donorIndex];
+        donors[donorIndex] = newDonor;
+        
+        emit DonorUpdated(donorIndex, oldDonor, newDonor);
+    }
+
+    /**
+     * @dev Update Frog Soup NFT contract address
+     * @param newFrogSoupNFT New NFT contract address
+     */
+    function setFrogSoupNFT(address newFrogSoupNFT) external onlyOwner {
+        require(newFrogSoupNFT != address(0), "Invalid NFT address");
+        
+        require(
+            IERC721(newFrogSoupNFT).supportsInterface(0x80ac58cd),
+            "Not a valid ERC721 contract"
+        );
+        
+        address oldNFT = FROG_SOUP_NFT;
+        FROG_SOUP_NFT = newFrogSoupNFT;
+        
+        emit FrogSoupNFTUpdated(oldNFT, newFrogSoupNFT);
+    }
+
     /**
      * @dev Setup DEX oracle for a gas token
      * @param token Token address (must be TOAD or BONE)
@@ -821,12 +887,6 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * @param token0IsWETH Whether WETH is token0 in the pool
      * @param minLiquidity Minimum liquidity threshold for valid pricing
      * @param updateInterval Cache duration in seconds (default: 300 = 5 minutes)
-     * 
-     * SETUP REQUIREMENTS:
-     * 1. Pool must exist and have sufficient liquidity
-     * 2. Pool must be token/WETH pair
-     * 3. Token must be TOAD or BONE (whitelisted)
-     * 4. Update interval must be reasonable (1-60 minutes)
      */
     function setupGasToken(
         address token,
@@ -840,7 +900,6 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
         require(updateInterval >= 60 && updateInterval <= 3600, "Invalid interval");
         require(minLiquidity > 0, "Invalid min liquidity");
         
-        // Create configuration
         gasTokenConfigs[token] = GasTokenConfig({
             isSupported: true,
             dexPool: dexPool,
@@ -852,7 +911,6 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
             lastValidPrice: 0
         });
         
-        // Initialize with current rate from DEX
         uint256 currentRate = _calculateDEXRate(gasTokenConfigs[token]);
         gasTokenConfigs[token].cachedRate = uint128(currentRate);
         gasTokenConfigs[token].lastUpdate = uint64(block.timestamp);
@@ -866,8 +924,6 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * @param token Token to update
      * @param newMinLiquidity New minimum liquidity requirement
      * @param newUpdateInterval New cache duration
-     * 
-     * ADMIN FUNCTION: Allows tuning oracle parameters based on market conditions
      */
     function updateGasTokenConfig(
         address token,
@@ -885,17 +941,13 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
     /**
      * @dev Manually refresh token rate (owner only)
      * @param token Token to refresh
-     * 
-     * EMERGENCY FUNCTION: Force rate update if needed
      */
     function refreshTokenRate(address token) external onlyOwner {
         GasTokenConfig storage config = gasTokenConfigs[token];
         require(config.isSupported, "Token not supported");
         
-        // Calculate fresh rate
         uint256 newRate = _calculateDEXRate(config);
         
-        // Apply circuit breaker
         if (config.lastValidPrice > 0) {
             uint256 priceChange = newRate > config.lastValidPrice 
                 ? ((newRate - config.lastValidPrice) * 100) / config.lastValidPrice
@@ -904,7 +956,6 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
             require(priceChange <= MAX_PRICE_CHANGE, "Price change too extreme");
         }
         
-        // Update cache
         config.cachedRate = uint128(newRate);
         config.lastUpdate = uint64(block.timestamp);
         config.lastValidPrice = newRate;
@@ -915,34 +966,20 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
     /**
      * @dev Emergency function to disable gas token
      * @param token Token to disable
-     * 
-     * EMERGENCY USE: If DEX pool becomes unreliable or manipulated
      */
     function disableGasToken(address token) external onlyOwner {
         gasTokenConfigs[token].isSupported = false;
     }
 
     /**
-     * @dev Withdraw accumulated platform fees
-     * @param token Token to withdraw (address(0) for ETH)
-     * 
-     * REVENUE FUNCTION: Owner can withdraw platform fees periodically
+     * @dev Withdraw accumulated platform fees (deprecated - fees go to donors)
      */
-    function withdrawPlatformFees(address token) external onlyOwner {
-        uint256 amount = collectedFees[token];
-        require(amount > 0, "No fees to withdraw");
-        
-        // Reset fee counter
-        collectedFees[token] = 0;
-        
-        // Transfer fees to owner
-        _transferFunds(owner(), amount, token);
+    function withdrawPlatformFees(address /* token */) external view onlyOwner {
+        revert("Use withdrawDonorFees() - fees distributed to donors");
     }
 
     /**
      * @dev Withdraw LINK tokens for VRF payments
-     * 
-     * MAINTENANCE FUNCTION: Owner can withdraw excess LINK
      */
     function withdrawLink() external onlyOwner {
         LinkTokenInterface link = LinkTokenInterface(LINK_TOKEN);
@@ -955,8 +992,6 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * @dev Update VRF configuration
      * @param _callbackGasLimit New gas limit for VRF callbacks
      * @param _requestConfirmations New confirmation count for VRF
-     * 
-     * VRF TUNING: Adjust based on network conditions and callback complexity
      */
     function updateVRFConfig(uint32 _callbackGasLimit, uint16 _requestConfirmations) external onlyOwner {
         require(_callbackGasLimit >= 200000 && _callbackGasLimit <= 2500000, "Invalid gas limit");
@@ -969,24 +1004,18 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
     /**
      * @dev Emergency function to resolve stuck games
      * @param gameId Game to resolve manually
-     * 
-     * EMERGENCY USE: If VRF fails to respond after 1+ hours
-     * BEHAVIOR: Refunds both players instead of determining winner
      */
     function emergencyResolveGame(uint256 gameId) external onlyOwner {
         Game storage game = games[gameId];
         require(game.state == GameState.WaitingForVRF, "Game not waiting for VRF");
         require(block.timestamp > game.createdAt + 1 hours, "Too early for emergency resolve");
         
-        // Refund both players (no winner/loser in emergency)
         _transferFunds(game.creator, game.amount, game.token);
         _transferFunds(game.joiner, game.amount, game.token);
         
-        // Still award participation points
         playerPoints[game.creator] += 2;
         playerPoints[game.joiner] += 2;
         
-        // Mark as cancelled
         game.state = GameState.Cancelled;
     }
 
@@ -995,8 +1024,6 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
     /**
      * @dev Check if contract can afford VRF requests
      * @return canAfford True if contract has sufficient LINK balance
-     * 
-     * MONITORING: Frontend can check before allowing game creation
      */
     function canAffordVRF() external view returns (bool canAfford) {
         LinkTokenInterface link = LinkTokenInterface(LINK_TOKEN);
@@ -1006,8 +1033,6 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
     /**
      * @dev Get current LINK balance
      * @return balance LINK tokens held by contract
-     * 
-     * MONITORING: Track VRF funding levels
      */
     function getLinkBalance() external view returns (uint256 balance) {
         LinkTokenInterface link = LinkTokenInterface(LINK_TOKEN);
@@ -1018,32 +1043,37 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
      * @dev Get contract statistics for monitoring
      * @return totalGames Total games created
      * @return pendingCount Currently pending games
-     * @return totalFees Total platform fees collected (ETH)
-     * 
-     * ANALYTICS: Overall contract performance metrics
+     * @return totalDonorFees Total fees allocated to all donors (ETH)
      */
     function getContractStats() external view returns (
         uint256 totalGames,
         uint256 pendingCount,
-        uint256 totalFees
+        uint256 totalDonorFees
     ) {
+        uint256 ethFees = 0;
+        for (uint256 i = 0; i < DONOR_COUNT; i++) {
+            ethFees += donorBalances[donors[i]][address(0)];
+        }
+        
         return (
             gameCounter,
             pendingGameIds.length,
-            collectedFees[address(0)] // ETH fees
+            ethFees
         );
     }
 
     /**
+     * @dev Get Frog Soup NFT contract address
+     * @return nftAddress Current Frog Soup NFT contract address
+     */
+    function getFrogSoupNFT() external view returns (address nftAddress) {
+        return FROG_SOUP_NFT;
+    }
+
+    /**
      * @dev Receive ETH payments
-     * 
-     * FUNCTIONALITY: Allows contract to receive ETH for:
-     * 1. Game bets (when creating/joining ETH games)
-     * 2. Direct funding for operational costs
-     * 3. Refunds or other transfers
      */
     receive() external payable {
         // Contract accepts ETH payments
-        // No special logic needed - ETH is tracked in contract balance
     }
 }

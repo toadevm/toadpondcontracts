@@ -7,7 +7,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
  * @title Comprehensive CoinFlip Deployment Script
- * @dev Handles deployment, configuration, and initial setup
+ * @dev Handles deployment, configuration, and initial setup with NFT requirements and donor system
  */
 contract DeployCoinFlip is Script {
     
@@ -89,6 +89,7 @@ contract DeployCoinFlip is Script {
         // Get token addresses from environment or use defaults
         address toadToken = vm.envOr("TOAD_TOKEN", address(0));
         address boneToken = vm.envOr("BONE_TOKEN", address(0));
+        address frogSoupNFT = vm.envOr("FROG_SOUP_NFT", address(0));
         
         if (toadToken == address(0)) {
             console.log("WARNING: Using placeholder TOAD token address");
@@ -100,21 +101,51 @@ contract DeployCoinFlip is Script {
             boneToken = 0x0987654321098765432109876543210987654321;
         }
         
+        if (frogSoupNFT == address(0)) {
+            console.log("WARNING: Using placeholder Frog Soup NFT address");
+            frogSoupNFT = 0x0987654321098765432109876543210987654321;
+        }
+        
+        // Get donor addresses from environment or use defaults
+        address[6] memory donors;
+        donors[0] = vm.envOr("DONOR_1", address(0x1111111111111111111111111111111111111111));
+        donors[1] = vm.envOr("DONOR_2", address(0x2222222222222222222222222222222222222222));
+        donors[2] = vm.envOr("DONOR_3", address(0x3333333333333333333333333333333333333333));
+        donors[3] = vm.envOr("DONOR_4", address(0x4444444444444444444444444444444444444444));
+        donors[4] = vm.envOr("DONOR_5", address(0x5555555555555555555555555555555555555555));
+        donors[5] = vm.envOr("DONOR_6", address(0x6666666666666666666666666666666666666666));
+        
         console.log("TOAD Token:", toadToken);
         console.log("BONE Token:", boneToken);
+        console.log("Frog Soup NFT:", frogSoupNFT);
         console.log("VRF Wrapper:", config.vrfWrapper);
         console.log("LINK Token:", config.linkToken);
         console.log("WETH:", config.weth);
         
+        console.log("=== DONOR ADDRESSES ===");
+        for (uint256 i = 0; i < 6; i++) {
+            console.log("Donor", i + 1, ":", donors[i]);
+            require(donors[i] != address(0), string(abi.encodePacked("Donor ", vm.toString(i + 1), " address is zero")));
+        }
+        
+        // Validate all addresses are unique
+        for (uint256 i = 0; i < 6; i++) {
+            for (uint256 j = i + 1; j < 6; j++) {
+                require(donors[i] != donors[j], "Duplicate donor addresses detected");
+            }
+        }
+        
         vm.startBroadcast(deployerPrivateKey);
         
-        // Deploy CoinFlip contract
+        // Deploy CoinFlip contract with NEW constructor parameters
         coinFlip = new CoinFlip(
-            config.vrfWrapper,
-            config.linkToken,
-            toadToken,
-            boneToken,
-            config.weth
+            config.vrfWrapper,  // _wrapperAddress
+            config.linkToken,   // _linkToken
+            toadToken,          // _toadToken
+            boneToken,          // _boneToken
+            config.weth,        // _weth
+            frogSoupNFT,        // _frogSoupNFT (NEW)
+            donors              // _donors (NEW - array of 6 addresses)
         );
         
         deployedContract = address(coinFlip);
@@ -191,7 +222,16 @@ contract DeployCoinFlip is Script {
         require(coinFlip.BONE_TOKEN() != address(0), "BONE token not set");
         require(coinFlip.LINK_TOKEN() == config.linkToken, "LINK token mismatch");
         require(coinFlip.WETH() == config.weth, "WETH mismatch");
+        require(coinFlip.getFrogSoupNFT() != address(0), "Frog Soup NFT not set");
         console.log(" Contract configuration verified");
+        
+        // Verify donor configuration
+        address[6] memory deployedDonors = coinFlip.getDonors();
+        for (uint256 i = 0; i < 6; i++) {
+            require(deployedDonors[i] != address(0), "Donor address not set");
+            console.log("  Donor", i + 1, "verified:", deployedDonors[i]);
+        }
+        console.log(" All 6 donors configured correctly");
         
         // Check VRF configuration
         require(coinFlip.callbackGasLimit() == 300000, "VRF gas limit incorrect");
@@ -213,6 +253,7 @@ contract DeployCoinFlip is Script {
         }
         
         console.log("Contract can afford VRF:", coinFlip.canAffordVRF());
+        console.log("Platform fee percentage:", coinFlip.PLATFORM_FEE_PERCENT(), "%");
     }
     
     function _printInstructions() internal view {
@@ -225,15 +266,23 @@ contract DeployCoinFlip is Script {
         console.log("   cast send %s 'transfer(address,uint256)' %s 10000000000000000000 --rpc-url $RPC_URL --private-key $PRIVATE_KEY", 
                    coinFlip.LINK_TOKEN(), deployedContract);
         console.log("");
-        console.log("3. If no DEX pools configured, set up Uniswap V3 pools:");
+        console.log("3. Verify Frog Soup NFT requirement:");
+        console.log("   Players need at least 1 NFT from:", coinFlip.getFrogSoupNFT());
+        console.log("   Test with: cast call %s 'canUserPlay(address)' <user_address>", deployedContract);
+        console.log("");
+        console.log("4. Donors can withdraw fees using:");
+        console.log("   cast send %s 'withdrawDonorFees(address)' <token_address>", deployedContract);
+        console.log("   Each donor gets ~0.833%% of each game pot (5%% / 6 donors)");
+        console.log("");
+        console.log("5. If no DEX pools configured, set up Uniswap V3 pools:");
         console.log("   - Create TOAD/WETH and BONE/WETH pools");
         console.log("   - Add liquidity (>$10k recommended)");
         console.log("   - Configure oracles using setupGasToken()");
         console.log("");
-        console.log("4. Test with small amounts first:");
+        console.log("6. Test with small amounts first:");
         console.log("   forge script script/TestScript.s.sol --rpc-url $RPC_URL --broadcast");
         console.log("");
-        console.log("5. Verify contract on Etherscan:");
+        console.log("7. Verify contract on Etherscan:");
         console.log("   forge verify-contract %s src/CoinFlip.sol:CoinFlip --etherscan-api-key $ETHERSCAN_API_KEY", deployedContract);
     }
     
@@ -309,6 +358,34 @@ contract DeployCoinFlip is Script {
         uint256 newBalance = coinFlipContract.getLinkBalance();
         console.log("New LINK balance:", newBalance / 1e18, "LINK");
         console.log("Can afford VRF:", coinFlipContract.canAffordVRF());
+        
+        vm.stopBroadcast();
+    }
+    
+    /**
+     * @dev Update donor address (owner only)
+     */
+    function updateDonor() external {
+        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+        address contractAddress = vm.envAddress("COINFLIP_ADDRESS");
+        uint256 donorIndex = vm.envUint("DONOR_INDEX"); // 0-5
+        address newDonor = vm.envAddress("NEW_DONOR_ADDRESS");
+        
+        CoinFlip coinFlipContract = CoinFlip(payable(contractAddress));
+        
+        vm.startBroadcast(deployerPrivateKey);
+        
+        console.log("=== UPDATING DONOR ===");
+        console.log("Contract:", contractAddress);
+        console.log("Donor Index:", donorIndex);
+        console.log("New Donor:", newDonor);
+        
+        address[6] memory currentDonors = coinFlipContract.getDonors();
+        console.log("Current Donor:", currentDonors[donorIndex]);
+        
+        coinFlipContract.updateDonor(donorIndex, newDonor);
+        
+        console.log(" Donor updated successfully");
         
         vm.stopBroadcast();
     }
