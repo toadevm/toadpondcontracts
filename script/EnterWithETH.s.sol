@@ -8,7 +8,7 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
 contract EnterWithETH is Script {
     // Your deployed contract address - UPDATE THIS to your actual contract
-    address payable constant LOTTERY_CONTRACT = payable(0xCAAd79b0b0cdB695B73C412A0D2BcD9B172d7039);
+    address payable constant LOTTERY_CONTRACT = payable(0x1041071BEe01e5f0aEBdDC75EEFeB36F8E0d62F3);
     
     function run() external {
         // Get private key from environment
@@ -22,8 +22,12 @@ contract EnterWithETH is Script {
         
         // Get sender address
         address sender = vm.addr(privateKey);
+        console.log("=== WALLET INFO ===");
         console.log("Sender address:", sender);
-        console.log("Sender ETH balance:", sender.balance);
+        
+        // Track wallet balance BEFORE any operations
+        uint256 walletBalanceBefore = sender.balance;
+        console.log("Wallet ETH balance BEFORE entry:", walletBalanceBefore);
         
         // Check NFT ownership requirement
         address nftContract = address(lottery.nftContract());
@@ -43,6 +47,7 @@ contract EnterWithETH is Script {
             ,
         ) = lottery.getRoundInfo(lottery.currentRoundId());
         
+        console.log("=== ROUND INFO ===");
         console.log("Current round ID:", lottery.currentRoundId());
         console.log("Round state (0=Active, 1=Full, 2=VRFRequested, 3=WinnersSelected, 4=PrizesDistributed, 5=Completed):", uint256(roundState));
         console.log("Current players in round:", currentPlayerCount);
@@ -55,6 +60,7 @@ contract EnterWithETH is Script {
         
         // Check if ETH entry is available
         (bool ethEntryAvailable, string memory ethStatus) = lottery.canEnterWithETH();
+        console.log("=== ETH ENTRY STATUS ===");
         console.log("ETH entry available:", ethEntryAvailable);
         console.log("ETH entry status:", ethStatus);
         
@@ -104,14 +110,21 @@ contract EnterWithETH is Script {
             console.log("Capped ETH amount to 3 ETH for safety");
         }
         
+        console.log("=== TRANSACTION PREPARATION ===");
         console.log("Final ETH amount to send:", ethToSend);
         console.log("(This includes 5% safety buffer)");
         
-        require(sender.balance >= ethToSend, "Insufficient ETH balance");
+        require(walletBalanceBefore >= ethToSend, "Insufficient ETH balance");
         
         // Get entry fee in BONE for reference
         uint256 entryFeeBone = lottery.ENTRY_FEE_BONE();
         console.log("Entry fee (BONE):", entryFeeBone);
+        
+        // === DETAILED BALANCE TRACKING ===
+        console.log("=== PRE-TRANSACTION BALANCE TRACKING ===");
+        console.log("Wallet balance before transaction:", walletBalanceBefore);
+        console.log("ETH being sent to contract:", ethToSend);
+        console.log("Expected wallet balance after send (before refund):", walletBalanceBefore - ethToSend);
         
         // Enter the lottery with ETH using contract's automatic system
         console.log("=== ENTERING LOTTERY ===");
@@ -122,17 +135,51 @@ contract EnterWithETH is Script {
         console.log("3. Refund unused ETH");
         console.log("4. Add you to lottery");
         
-        uint256 balanceBefore = sender.balance;
-        
         try lottery.enterWithETH{value: ethToSend}() {
-            uint256 balanceAfter = sender.balance;
-            uint256 actualETHUsed = balanceBefore - balanceAfter;
+            // Get wallet balance immediately after transaction
+            uint256 walletBalanceAfter = sender.balance;
             
+            // Calculate the actual ETH spent from wallet perspective
+            uint256 actualETHSpentFromWallet = walletBalanceBefore - walletBalanceAfter;
+            uint256 ethRefundedToWallet = ethToSend - actualETHSpentFromWallet;
+            
+            console.log("=== POST-TRANSACTION BALANCE ANALYSIS ===");
             console.log("SUCCESS: Entered lottery with ETH!");
-            console.log("ETH sent:", ethToSend);
-            console.log("Actual ETH used:", actualETHUsed);
-            console.log("ETH refunded:", ethToSend - actualETHUsed);
-            console.log("Refund percentage:", ((ethToSend - actualETHUsed) * 100) / ethToSend);
+            console.log("");
+            console.log("WALLET BALANCE TRACKING:");
+            console.log("- Wallet balance BEFORE:", walletBalanceBefore);
+            console.log("- Wallet balance AFTER: ", walletBalanceAfter);
+            console.log("- ETH sent to contract:  ", ethToSend);
+            console.log("- Actual ETH spent:      ", actualETHSpentFromWallet);
+            console.log("- ETH refunded to wallet:", ethRefundedToWallet);
+            console.log("");
+            
+            // Calculate percentages for better understanding
+            uint256 refundPercentage = (ethRefundedToWallet * 100) / ethToSend;
+            uint256 usedPercentage = (actualETHSpentFromWallet * 100) / ethToSend;
+            
+            console.log("EFFICIENCY METRICS:");
+            console.log("- Percentage of ETH actually used:", usedPercentage, "%");
+            console.log("- Percentage of ETH refunded:    ", refundPercentage, "%");
+            console.log("");
+            
+            // Validate refund logic
+            if (ethRefundedToWallet > 0) {
+                console.log(" REFUND SUCCESSFUL: Contract properly refunded unused ETH");
+                console.log("   Refund amount:", ethRefundedToWallet, "wei");
+                console.log("   Refund amount (ETH):", ethRefundedToWallet / 1e18, "ETH");
+            } else if (ethRefundedToWallet == 0) {
+                console.log(" NO REFUND: Contract used exactly the amount sent (unlikely but possible)");
+            } else {
+                console.log(" REFUND ERROR: Negative refund detected - this should not happen!");
+            }
+            
+            // Additional validation - check if we spent more than expected
+            if (actualETHSpentFromWallet > ethToSend) {
+                console.log(" ERROR: Spent more ETH than sent - this indicates a serious problem!");
+            } else {
+                console.log(" VALIDATION: ETH spent is within expected range");
+            }
             
             // Get updated round info
             (
@@ -152,12 +199,6 @@ contract EnterWithETH is Script {
                 console.log("*** ROUND IS NOW FULL! ***");
                 console.log("You can now call requestRandomWords() to trigger VRF!");
                 console.log("NOTE: Contract needs LINK tokens for VRF to work!");
-                
-                // Check VRF funding
-                (, , , bool sufficientFunds) = lottery.getVRFFundingStatus();
-                if (!sufficientFunds) {
-                    console.log("WARNING: Contract needs LINK funding before VRF can work!");
-                }
             }
             
             // Display player stats
@@ -167,8 +208,23 @@ contract EnterWithETH is Script {
             console.log("Total entries:", totalEntries);
             console.log("Player points:", playerPoints);
             
+            // Final summary
+            console.log("=== FINAL SUMMARY ===");
+            console.log("Entry completed successfully!");
+            console.log("Total ETH cost:", actualETHSpentFromWallet);
+            console.log("ETH savings from refund:", ethRefundedToWallet);
+            console.log("Wallet balance remaining:", walletBalanceAfter);
+            
         } catch Error(string memory reason) {
+            // Get wallet balance after failed transaction to account for gas costs
+            uint256 walletBalanceAfterFailure = sender.balance;
+            uint256 gasCostFromFailure = walletBalanceBefore - walletBalanceAfterFailure;
+            
+            console.log("=== TRANSACTION FAILED ===");
             console.log("Transaction failed with reason:", reason);
+            console.log("Wallet balance before:", walletBalanceBefore);
+            console.log("Wallet balance after failure:", walletBalanceAfterFailure);
+            console.log("Gas cost from failed transaction:", gasCostFromFailure);
             
             // Provide helpful debugging
             if (keccak256(bytes(reason)) == keccak256("Insufficient ETH - contract calculated optimal amount automatically")) {
@@ -180,7 +236,14 @@ contract EnterWithETH is Script {
             
             revert(reason);
         } catch {
-            console.log("Transaction failed with unknown error");
+            // Get wallet balance after failed transaction to account for gas costs
+            uint256 walletBalanceAfterFailure = sender.balance;
+            uint256 gasCostFromFailure = walletBalanceBefore - walletBalanceAfterFailure;
+            
+            console.log("=== TRANSACTION FAILED WITH UNKNOWN ERROR ===");
+            console.log("Wallet balance before:", walletBalanceBefore);
+            console.log("Wallet balance after failure:", walletBalanceAfterFailure);
+            console.log("Gas cost from failed transaction:", gasCostFromFailure);
             console.log("This might be due to:");
             console.log("1. Pool liquidity issues");
             console.log("2. Price feed problems");
@@ -238,62 +301,34 @@ contract EnterWithETH is Script {
             console.log("Optimal available:", optimalAvailable);
             console.log("Message:", message);
         }
-        
-        // Check VRF funding
-        (uint256 linkBalance, uint256 costPerRequest, uint256 requestsAffordable, bool sufficientFunds) = 
-            lottery.getVRFFundingStatus();
-            
-        console.log("=== VRF FUNDING STATUS ===");
-        console.log("LINK balance:", linkBalance);
-        console.log("Cost per request:", costPerRequest);
-        console.log("Requests affordable:", requestsAffordable);
-        console.log("Sufficient funds:", sufficientFunds);
-        
-        // Check round readiness
-        console.log("=== ROUND READINESS ===");
-        console.log("Ready for VRF:", lottery.isRoundReadyForVRF(lottery.currentRoundId()));
-        console.log("Ready for prize distribution:", lottery.isRoundReadyForPrizeDistribution(lottery.currentRoundId()));
-        console.log("Ready for completion:", lottery.isRoundReadyForCompletion(lottery.currentRoundId()));
     }
     
     /**
-     * @dev Test function to see what the automatic pricing system calculates
+     * @dev Helper function to check wallet balance without making any transactions
      */
-    function testPricingCalculation() external view {
+    function checkWalletBalance() external view {
+        uint256 privateKey = vm.envUint("ENTER_PRIVATE_KEY");
+        address sender = vm.addr(privateKey);
+        
+        console.log("=== WALLET BALANCE CHECK ===");
+        console.log("Wallet address:", sender);
+        console.log("Current ETH balance:", sender.balance);
+        console.log("Current ETH balance (in ETH):", sender.balance / 1e18);
+        
+        // Check if wallet has enough for optimal amount
         VRFLottery lottery = VRFLottery(LOTTERY_CONTRACT);
+        (uint256 optimalAmount, bool available,) = lottery.getOptimalETHAmount();
         
-        console.log("=== AUTOMATIC PRICING TEST ===");
-        
-        // Get all pricing information
-        (bool canEnter, string memory status) = lottery.canEnterWithETH();
-        console.log("Can enter with ETH:", canEnter);
-        console.log("Entry status:", status);
-        
-        (uint256 optimal, bool available, string memory message) = lottery.getOptimalETHAmount();
-        console.log("Optimal amount:", optimal);
-        console.log("Available:", available);
-        console.log("Message:", message);
-        
-        // Pool information
-        (, uint256 bonePerEth, uint256 ethNeeded, bool poolExists) = lottery.getPoolPriceInfo();
-        console.log("Pool exists:", poolExists);
-        console.log("BONE per ETH:", bonePerEth);
-        console.log("ETH needed (legacy calc):", ethNeeded);
-        
-        if (bonePerEth > 0) {
-            // Manual calculation for comparison
-            uint256 entryFee = lottery.ENTRY_FEE_BONE();
-            uint256 baseSlippage = lottery.baseSlippage();
-            uint256 baseRequired = (entryFee * 1e18) / bonePerEth;
-            uint256 withSlippage = (baseRequired * (10000 + baseSlippage)) / 10000;
-            uint256 withBuffer = (withSlippage * 12000) / 10000; // 20% buffer
+        if (available) {
+            uint256 ethToSend = (optimalAmount * 105) / 100; // Including 5% buffer
+            console.log("Required ETH (with buffer):", ethToSend);
+            console.log("Can afford entry:", sender.balance >= ethToSend ? "YES" : "NO");
             
-            console.log("=== MANUAL CALCULATION ===");
-            console.log("Entry fee (BONE):", entryFee);
-            console.log("Base slippage:", baseSlippage);
-            console.log("Base ETH required:", baseRequired);
-            console.log("With slippage:", withSlippage);
-            console.log("With 20% buffer:", withBuffer);
+            if (sender.balance >= ethToSend) {
+                console.log("Remaining after entry (estimated):", sender.balance - ethToSend);
+            } else {
+                console.log("Additional ETH needed:", ethToSend - sender.balance);
+            }
         }
     }
 }
