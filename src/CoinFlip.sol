@@ -65,22 +65,22 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
 
     /// @dev Core game data - optimized packing to fit in 3 storage slots
     struct Game {
-        address creator;         // 20 bytes - slot 1
-        address joiner;          // 20 bytes - slot 2  
-        uint256 amount;          // 32 bytes - slot 3
-        address token;           // 20 bytes - slot 4
-        bool creatorCoinSide;    // 1 byte  - slot 4 (packed)
-        GameState state;         // 1 byte  - slot 4 (packed)
-        uint256 vrfRequestId;    // 32 bytes - slot 5
-        bool result;             // 1 byte  - slot 6
-        address winner;          // 20 bytes - slot 6 (packed)
-        uint256 createdAt;       // 32 bytes - slot 7
+        address creator;         
+        address joiner;          
+        uint256 amount;          
+        address token;           
+        bool creatorCoinSide;    
+        GameState state;         
+        uint256 vrfRequestId;    
+        bool result;            
+        address winner;          
+        uint256 createdAt;     
     }
 
     /// @dev VRF request tracking - fits in 1 slot
     struct VRFRequest {
-        uint256 gameId;          // 32 bytes
-        bool fulfilled;          // 1 byte (packed with next struct)
+        uint256 gameId;         
+        bool fulfilled;         
     }
 
     /// @dev Batch operation parameters
@@ -92,60 +92,60 @@ contract CoinFlip is VRFV2PlusWrapperConsumerBase, ConfirmedOwner, ReentrancyGua
 
     /// @dev Gas token configuration - optimized packing for gas efficiency
     struct GasTokenConfig {
-        bool isSupported;        // 1 byte  - slot 1
-        address dexPool;         // 20 bytes - slot 1 (packed)
-        bool token0IsWETH;       // 1 byte  - slot 1 (packed)
-        uint128 cachedRate;      // 16 bytes - slot 2
-        uint64 lastUpdate;       // 8 bytes  - slot 2 (packed)
-        uint32 updateInterval;   // 4 bytes  - slot 2 (packed) 
-        uint128 minLiquidity;    // 16 bytes - slot 3
-        uint256 lastValidPrice;  // 32 bytes - slot 4 (for circuit breaker)
+        bool isSupported;        
+        address dexPool;         
+        bool token0IsWETH;       
+        uint128 cachedRate;      
+        uint64 lastUpdate;      
+        uint32 updateInterval;    
+        uint128 minLiquidity;    
+        uint256 lastValidPrice;  
     }
 
     // ============ STATE VARIABLES ============
     
     // Core game state
-    mapping(uint256 => Game) public games;                    // gameId => Game data
-    mapping(uint256 => VRFRequest) public vrfRequests;        // vrfRequestId => VRFRequest
-    mapping(address => uint256) public playerPoints;          // player => total points
-    mapping(address => mapping(address => uint256)) public donorBalances; // donor => token => balance
-    mapping(address => uint256) public playerLastGameBlock;   // player => last game block (MEV protection)
+    mapping(uint256 => Game) public games;                   
+    mapping(uint256 => VRFRequest) public vrfRequests;       
+    mapping(address => uint256) public playerPoints;         
+    mapping(address => mapping(address => uint256)) public donorBalances; 
+    mapping(address => uint256) public playerLastGameBlock;   
     
     // Gas abstraction with efficient caching
-    mapping(address => GasTokenConfig) public gasTokenConfigs; // token => pricing config
+    mapping(address => GasTokenConfig) public gasTokenConfigs;
     
-    uint256 public gameCounter;                               // Incremental game ID
-    uint256[] public pendingGameIds;                          // Games awaiting opponents
+    uint256 public gameCounter;                             
+    uint256[] public pendingGameIds;                        
     
     // Donor addresses (6 total)
-    address[6] public donors;                                 // Fixed array of 6 donor addresses
-    uint256 public constant DONOR_COUNT = 6;                 // Number of donors
+    address[6] public donors;                                 
+    uint256 public constant DONOR_COUNT = 6;               
     
     // VRF configuration
-    uint32 public callbackGasLimit = 300000;                 // Gas limit for VRF callback
-    uint16 public requestConfirmations = 3;                  // Block confirmations for VRF
-    uint32 public constant numWords = 1;                     // Number of random words needed
+    uint32 public callbackGasLimit = 300000;                
+    uint16 public requestConfirmations = 3;                 
+    uint32 public constant numWords = 1;                     
     
     // Token addresses (immutable after deployment)
     address public immutable TOAD_TOKEN;
     address public immutable BONE_TOKEN;
     address public immutable LINK_TOKEN;
-    address public immutable WETH;                           // For DEX pair identification
+    address public immutable WETH;                          
     
     // NFT requirement
-    address public FROG_SOUP_NFT;                            // Frog Soup NFT contract address
+    address public FROG_SOUP_NFT;                            
     
     // Security and efficiency constants
-    uint256 public constant PLATFORM_FEE_PERCENT = 5;        // 5% platform fee
-    uint256 public constant MAX_GAS_PRICE = 100 gwei;        // Prevent gas price manipulation
-    uint256 public constant MAX_GAS_COST_TOKENS = 1000000e18; // Max tokens for gas payment
-    uint256 public constant MAX_BATCH_SIZE = 10;             // Limit batch operations
-    uint256 public constant MAX_PRICE_CHANGE = 50;           // 50% circuit breaker
-    uint256 public constant DEFAULT_UPDATE_INTERVAL = 300;   // 5 minutes cache duration
-    uint256 public constant MIN_RATE = 1e15;                 // 0.001 tokens per ETH min
-    uint256 public constant MAX_RATE = 1e25;                 // 10M tokens per ETH max
-    uint32 public constant TWAP_PERIOD = 300;                // 5-minute TWAP for responsiveness
-    uint256 public constant MIN_BLOCK_INTERVAL = 1;          // Minimum blocks between games per player
+    uint256 public constant PLATFORM_FEE_PERCENT = 5;     
+    uint256 public constant MAX_GAS_PRICE = 100 gwei;        
+    uint256 public constant MAX_GAS_COST_TOKENS = 1000000e18; 
+    uint256 public constant MAX_BATCH_SIZE = 10;             
+    uint256 public constant MAX_PRICE_CHANGE = 50;          
+    uint256 public constant DEFAULT_UPDATE_INTERVAL = 300;   
+    uint256 public constant MIN_RATE = 1e15;                
+    uint256 public constant MAX_RATE = 1e25;                
+    uint32 public constant TWAP_PERIOD = 300;                
+    uint256 public constant MIN_BLOCK_INTERVAL = 1;          
 
     // ============ MODIFIERS ============
 
