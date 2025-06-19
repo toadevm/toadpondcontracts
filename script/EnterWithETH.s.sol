@@ -8,11 +8,11 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
 contract EnterWithETH is Script {
     // Your deployed contract address - UPDATE THIS to your actual contract
-    address payable constant LOTTERY_CONTRACT = payable(0x1041071BEe01e5f0aEBdDC75EEFeB36F8E0d62F3);
+    address payable constant LOTTERY_CONTRACT = payable(0xFC693f60FE0781CCB0Fe07f681381B78a022986a);
     
     function run() external {
         // Get private key from environment
-        uint256 privateKey = vm.envUint("ENTER_PRIVATE_KEY");
+        uint256 privateKey = vm.envUint("ENTER_PRIVATE_KEY_3");
         
         // Start broadcasting transactions
         vm.startBroadcast(privateKey);
@@ -58,16 +58,16 @@ contract EnterWithETH is Script {
         
         // === USE CONTRACT'S AUTOMATIC PRICING SYSTEM ===
         
-        // Check if ETH entry is available
-        (bool ethEntryAvailable, string memory ethStatus) = lottery.canEnterWithETH();
-        console.log("=== ETH ENTRY STATUS ===");
-        console.log("ETH entry available:", ethEntryAvailable);
-        console.log("ETH entry status:", ethStatus);
+        // // Check if ETH entry is available
+        // (bool ethEntryAvailable, string memory ethStatus) = lottery.canEnterWithETH();
+        // console.log("=== ETH ENTRY STATUS ===");
+        // console.log("ETH entry available:", ethEntryAvailable);
+        // console.log("ETH entry status:", ethStatus);
         
-        if (!ethEntryAvailable) {
-            console.log("ETH entry not available - please use BONE tokens instead");
-            revert("ETH entry not available");
-        }
+        // if (!ethEntryAvailable) {
+        //     console.log("ETH entry not available - please use BONE tokens instead");
+        //     revert("ETH entry not available");
+        // }
         
         // Get the contract's calculated optimal ETH amount
         (
@@ -85,18 +85,18 @@ contract EnterWithETH is Script {
         require(optimalAmount > 0, "Invalid optimal amount calculated");
         
         // Get pool price info for debugging
-        (
-            uint160 sqrtPriceX96,
-            uint256 bonePerEth,
-            uint256 ethNeededForEntry,
-            bool poolExists
-        ) = lottery.getPoolPriceInfo();
+        // (
+        //     uint160 sqrtPriceX96,
+        //     uint256 bonePerEth,
+        //     uint256 ethNeededForEntry,
+        //     bool poolExists
+        // ) = lottery.getPoolPriceInfo();
         
-        console.log("=== POOL PRICE INFO ===");
-        console.log("Pool exists:", poolExists);
-        console.log("SqrtPriceX96:", sqrtPriceX96);
-        console.log("BONE per ETH:", bonePerEth);
-        console.log("ETH needed for entry (legacy calc):", ethNeededForEntry);
+        // console.log("=== POOL PRICE INFO ===");
+        // console.log("Pool exists:", poolExists);
+        // console.log("SqrtPriceX96:", sqrtPriceX96);
+        // console.log("BONE per ETH:", bonePerEth);
+        // console.log("ETH needed for entry (legacy calc):", ethNeededForEntry);
         
         // Safety check - use the contract's optimal amount
         uint256 ethToSend = optimalAmount;
@@ -289,18 +289,18 @@ contract EnterWithETH is Script {
             console.log("No winners selected yet");
         }
         
-        // Check ETH entry availability
-        (bool ethAvailable, string memory ethStatus) = lottery.canEnterWithETH();
-        console.log("=== ETH ENTRY STATUS ===");
-        console.log("ETH entry available:", ethAvailable);
-        console.log("Status:", ethStatus);
+        // // Check ETH entry availability
+        // (bool ethAvailable, string memory ethStatus) = lottery.canEnterWithETH();
+        // console.log("=== ETH ENTRY STATUS ===");
+        // console.log("ETH entry available:", ethAvailable);
+        // console.log("Status:", ethStatus);
         
-        if (ethAvailable) {
-            (uint256 optimalAmount, bool optimalAvailable, string memory message) = lottery.getOptimalETHAmount();
-            console.log("Optimal ETH amount:", optimalAmount);
-            console.log("Optimal available:", optimalAvailable);
-            console.log("Message:", message);
-        }
+        // if (ethAvailable) {
+        //     (uint256 optimalAmount, bool optimalAvailable, string memory message) = lottery.getOptimalETHAmount();
+        //     console.log("Optimal ETH amount:", optimalAmount);
+        //     console.log("Optimal available:", optimalAvailable);
+        //     console.log("Message:", message);
+        // }
     }
     
     /**

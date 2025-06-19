@@ -10,12 +10,20 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
- * @title CrossChainLotteryEntry - Shibarium BONE Optimized
- * @dev Cross-chain lottery contract optimized for Shibarium's BONE economics
- * @notice Users pay entry fee + CCIP fees in native BONE (much lower value than ETH)
+ * @title CrossChainLotteryEntry - Shibarium BONE Optimized with Proportional Distribution
+ * @dev Cross-chain lottery contract with proportional prize distribution
+ * @notice Winners withdraw proportional shares from each chain based on contributions
  * @author Your Team
  */
 contract CrossChainLotteryEntry is CCIPReceiver, ReentrancyGuard, Pausable {
+    
+    // ===== MESSAGE TYPES =====
+    enum MessageType {
+        ENTRY_RESPONSE,
+        WINNERS_NOTIFICATION,
+        ROUND_SYNC,
+        ENTRY_REQUEST
+    }
     
     // ===== STRUCTS =====
     
@@ -26,15 +34,19 @@ contract CrossChainLotteryEntry is CCIPReceiver, ReentrancyGuard, Pausable {
         bool verified;           // 1 byte - verification status
     }
 
-    /// @dev Round information for local chain
+    /// @dev Round information for local chain with proportional tracking
     struct RoundInfo {
         address[] localPlayers;                    // Dynamic array of local players
         address[3] winners;                        // Winners from main contract
-        uint128 localPrizePool;                   // Local BONE prize pool
-        uint128 totalChainPrizePool;              // Total cross-chain prize pool
+        uint128 localPrizePool;                   // This chain's contribution
+        uint128 totalChainPrizePool;              // Total across all chains
         bool winnersReceived;                     // Whether winners data received
         mapping(address => bool) hasEntered;      // Player entry tracking
         mapping(address => uint32) playerIndex;   // Player index mapping
+        // NEW: Track chain contributions for proportional distribution
+        mapping(uint64 => uint128) chainContributions;
+        uint64[] contributingChains;
+        uint128 mainChainContribution;           // Main chain's contribution
     }
 
     // ===== CONSTANTS =====
@@ -102,6 +114,11 @@ contract CrossChainLotteryEntry is CCIPReceiver, ReentrancyGuard, Pausable {
     event PendingEntryAdded(address indexed player, uint256 totalPaid, uint256 ccipFee);
     event NativeBoneReceived(address indexed from, uint256 amount);
     event ContractSynced(uint256 roundId);
+    
+    /// @dev NEW: Proportional distribution events
+    event RoundSynchronized(uint256 oldRound, uint256 newRound);
+    event ProportionalPrizeDistributed(address indexed winner, uint256 amount, uint256 chainContribution, uint256 totalPool);
+    event ChainContributionsReceived(uint256 indexed roundId, uint64[] chains, uint128[] contributions);
     
     /// @dev Admin and configuration events
     event EthereumContractUpdated(address indexed oldContract, address indexed newContract);
@@ -233,7 +250,12 @@ contract CrossChainLotteryEntry is CCIPReceiver, ReentrancyGuard, Pausable {
      * @dev ADJUSTED: Works with BONE values instead of ETH values
      */
     function estimateCCIPFee() external view returns (uint256) {
-        bytes memory data = abi.encode(address(this), ENTRY_FEE_BONE);
+        bytes memory data = abi.encode(
+            uint8(MessageType.ENTRY_REQUEST),
+            currentRoundId,
+            address(this),
+            ENTRY_FEE_BONE
+        );
         
         Client.EVM2AnyMessage memory ccipMessage = Client.EVM2AnyMessage({
             receiver: abi.encode(ethereumMainContract),
@@ -323,7 +345,12 @@ contract CrossChainLotteryEntry is CCIPReceiver, ReentrancyGuard, Pausable {
      * @dev ADJUSTED: Better error handling for BONE-based fees
      */
     function _requestNFTVerification(address player, uint256 ccipBudget) internal {
-        bytes memory data = abi.encode(player, ENTRY_FEE_BONE);
+        bytes memory data = abi.encode(
+            uint8(MessageType.ENTRY_REQUEST),
+            currentRoundId, // Send current round for sync
+            player,
+            ENTRY_FEE_BONE
+        );
 
         Client.EVM2AnyMessage memory ccipMessage = Client.EVM2AnyMessage({
             receiver: abi.encode(ethereumMainContract),
@@ -373,34 +400,36 @@ contract CrossChainLotteryEntry is CCIPReceiver, ReentrancyGuard, Pausable {
         }
     }
 
-    // ===== CCIP MESSAGE HANDLING =====
+    // ===== UPDATED CCIP MESSAGE HANDLING =====
 
     function _ccipReceive(Client.Any2EVMMessage memory message) internal override {
         if (abi.decode(message.sender, (address)) != ethereumMainContract) return;
 
         bytes memory data = message.data;
-
-        // Try different message types with fallback handling
-        try this.handleEntryResponse(data) {
-            return;
-        } catch {}
-
-        try this.handleWinnersNotification(data) {
-            return;
-        } catch {}
-
-        try this.handleRoundSync(data) {
-            return;
-        } catch {}
+        uint8 messageType = uint8(data[0]);
+        
+        if (messageType == uint8(MessageType.ENTRY_RESPONSE)) {
+            _handleEntryResponse(data);
+        } else if (messageType == uint8(MessageType.WINNERS_NOTIFICATION)) {
+            _handleWinnersNotification(data);
+        } else if (messageType == uint8(MessageType.ROUND_SYNC)) {
+            _handleRoundSync(data);
+        }
     }
 
-    function handleEntryResponse(bytes memory data) external {
-        require(msg.sender == address(this), "Internal call only");
-
-        (address player, bool approved, string memory reason) = abi.decode(
-            data,
-            (address, bool, string)
-        );
+    function _handleEntryResponse(bytes memory data) internal {
+        (
+            ,
+            uint256 mainRoundId,
+            address player,
+            bool approved,
+            string memory reason
+        ) = abi.decode(data, (uint8, uint256, address, bool, string));
+        
+        // Sync round if needed
+        if (mainRoundId > currentRoundId) {
+            _syncToRound(mainRoundId);
+        }
 
         if (!hasPendingEntry[player]) return;
 
@@ -413,27 +442,51 @@ contract CrossChainLotteryEntry is CCIPReceiver, ReentrancyGuard, Pausable {
         }
     }
 
-    function handleWinnersNotification(bytes memory data) external {
-        require(msg.sender == address(this), "Internal call only");
-
+    function _handleWinnersNotification(bytes memory data) internal {
         (
+            ,
             uint256 roundId,
             address[3] memory winners,
-            uint256 chainPrizePool
-        ) = abi.decode(data, (uint256, address[3], uint256));
-
-        _processRoundWinners(roundId, winners, chainPrizePool);
+            uint256 totalPrizePool,
+            uint128 mainChainContribution,
+            uint64[] memory chains,
+            uint128[] memory contributions
+        ) = abi.decode(
+            data,
+            (uint8, uint256, address[3], uint256, uint128, uint64[], uint128[])
+        );
+        
+        // Sync round if needed
+        if (roundId > currentRoundId) {
+            _syncToRound(roundId);
+        }
+        
+        _processRoundWinners(
+            roundId,
+            winners,
+            totalPrizePool,
+            mainChainContribution,
+            chains,
+            contributions
+        );
     }
 
-    function handleRoundSync(bytes memory data) external {
-        require(msg.sender == address(this), "Internal call only");
-
-        uint256 newRoundId = abi.decode(data, (uint256));
+    function _handleRoundSync(bytes memory data) internal {
+        (, uint256 newRoundId) = abi.decode(data, (uint8, uint256));
         
         if (newRoundId > currentRoundId) {
-            currentRoundId = uint128(newRoundId);
-            emit ContractSynced(newRoundId);
+            _syncToRound(newRoundId);
         }
+    }
+
+    function _syncToRound(uint256 newRoundId) internal {
+        if (newRoundId <= currentRoundId) return;
+        
+        uint256 oldRound = currentRoundId;
+        currentRoundId = uint128(newRoundId);
+        
+        emit RoundSynchronized(oldRound, newRoundId);
+        emit ContractSynced(newRoundId);
     }
 
     // ===== PLAYER MANAGEMENT =====
@@ -500,78 +553,84 @@ contract CrossChainLotteryEntry is CCIPReceiver, ReentrancyGuard, Pausable {
         emit PlayerRemoved(player, totalRefund, reason);
     }
 
+    // ===== NEW: PROPORTIONAL DISTRIBUTION =====
+
     function _processRoundWinners(
         uint256 roundId,
         address[3] memory winners,
-        uint256 chainPrizePool
+        uint256 totalPrizePool,
+        uint128 mainChainContribution,
+        uint64[] memory chains,
+        uint128[] memory contributions
     ) internal {
         RoundInfo storage round = rounds[roundId];
         round.winnersReceived = true;
         round.winners = winners;
-        round.totalChainPrizePool = uint128(chainPrizePool);
-
-        _distributePrizes(roundId);
-
-        emit WinnersReceived(roundId, winners, chainPrizePool);
+        round.totalChainPrizePool = uint128(totalPrizePool);
+        round.mainChainContribution = mainChainContribution;
+        
+        // Store chain contributions
+        for (uint256 i = 0; i < chains.length; i++) {
+            round.chainContributions[chains[i]] = contributions[i];
+            round.contributingChains.push(chains[i]);
+        }
+        
+        emit ChainContributionsReceived(roundId, chains, contributions);
+        emit WinnersReceived(roundId, winners, totalPrizePool);
+        
+        _distributePrizesProportionally(roundId);
         
         if (roundId == currentRoundId) {
             _startNewRound();
         }
     }
 
-    /**
-     * @dev Distribute prizes - SIMPLIFIED for combined funding share
-     * @dev No longer needs separate burn distribution since it's combined
-     */
-    function _distributePrizes(uint256 roundId) internal {
+    function _distributePrizesProportionally(uint256 roundId) internal {
         RoundInfo storage round = rounds[roundId];
         if (!round.winnersReceived || round.localPrizePool == 0) return;
 
-        uint256 totalLocalPrize = round.localPrizePool;
+        uint256 localContribution = round.localPrizePool;
+        uint256 totalPool = round.totalChainPrizePool;
         
-        // Calculate distributions (simplified)
-        uint256 winnersTotal = (totalLocalPrize * WINNERS_SHARE) / 100;      // 60%
-        uint256 devAmount = (totalLocalPrize * DEV_SHARE) / 100;             // 5%
-        uint256 fundingTotal = (totalLocalPrize * FUNDING_SHARE) / 100;      // 35% (includes burn bonus)
-
-        uint256 winnerAmount = winnersTotal / 3;
-        uint256 fundingPerAddress = fundingTotal / 5;
-
-        // Distribute to winners
-        for (uint256 i; i < 3;) {
-            if (round.winners[i] != address(0) && round.hasEntered[round.winners[i]]) {
+        // Calculate this chain's proportion of total pool
+        uint256 localWinnersShare = (localContribution * WINNERS_SHARE) / 100;
+        uint256 localDevShare = (localContribution * DEV_SHARE) / 100;
+        uint256 localFundingShare = (localContribution * FUNDING_SHARE) / 100;
+        
+        // Distribute proportional winner shares
+        uint256 perWinnerAmount = localWinnersShare / 3;
+        
+        for (uint256 i = 0; i < 3; i++) {
+            if (round.winners[i] != address(0)) {
                 unchecked {
-                    pendingWithdrawalsBone[round.winners[i]] += uint128(winnerAmount);
-                    totalWinningsBone[round.winners[i]] += uint128(winnerAmount);
+                    pendingWithdrawalsBone[round.winners[i]] += uint128(perWinnerAmount);
+                    totalWinningsBone[round.winners[i]] += uint128(perWinnerAmount);
                 }
-                emit LocalWinnerPayout(round.winners[i], winnerAmount);
+                emit ProportionalPrizeDistributed(
+                    round.winners[i],
+                    perWinnerAmount,
+                    localContribution,
+                    totalPool
+                );
             }
-            unchecked { ++i; }
         }
-
-        // Distribute to dev
+        
+        // Distribute local dev and funding shares
         unchecked {
-            pendingWithdrawalsBone[devAddress] += uint128(devAmount);
-            totalWinningsBone[devAddress] += uint128(devAmount);
+            pendingWithdrawalsBone[devAddress] += uint128(localDevShare);
+            totalWinningsBone[devAddress] += uint128(localDevShare);
         }
-
-        // Distribute to funding addresses (35% total share)
-        for (uint256 i; i < 5;) {
+        
+        uint256 fundingPerAddress = localFundingShare / 5;
+        for (uint256 i = 0; i < 5; i++) {
             unchecked {
                 pendingWithdrawalsBone[fundingAddresses[i]] += uint128(fundingPerAddress);
                 totalWinningsBone[fundingAddresses[i]] += uint128(fundingPerAddress);
-                ++i;
             }
         }
-
-        // Emit single event for funding distribution
-        emit FundingAddressesBonusDistributed(fundingTotal);
+        
+        emit FundingAddressesBonusDistributed(localFundingShare);
     }
-
-    /**
-     * @dev REMOVED: _distributeBurnShareToFunding() - no longer needed
-     * Since we combined the funding share to 35%, no separate burn distribution needed
-     */
 
     function _startNewRound() internal {
         unchecked { ++currentRoundId; }
@@ -604,7 +663,7 @@ contract CrossChainLotteryEntry is CCIPReceiver, ReentrancyGuard, Pausable {
         emit WithdrawalMade(msg.sender, amount);
     }
 
-    // ===== VIEW FUNCTIONS =====
+    // ===== NEW VIEW FUNCTIONS =====
 
     function getCurrentRoundPlayers() external view returns (address[] memory) {
         return rounds[currentRoundId].localPlayers;
@@ -674,6 +733,78 @@ contract CrossChainLotteryEntry is CCIPReceiver, ReentrancyGuard, Pausable {
         return fundingAddresses;
     }
 
+    function getWinnerShareFromThisChain(uint256 roundId, address winner) external view returns (uint256) {
+        RoundInfo storage round = rounds[roundId];
+        
+        // Check if address is a winner
+        bool isWinner = false;
+        for (uint256 i = 0; i < 3; i++) {
+            if (round.winners[i] == winner) {
+                isWinner = true;
+                break;
+            }
+        }
+        
+        if (!isWinner || round.localPrizePool == 0) return 0;
+        
+        uint256 localWinnersShare = (round.localPrizePool * WINNERS_SHARE) / 100;
+        return localWinnersShare / 3;
+    }
+
+    function getChainContributions(uint256 roundId) external view returns (
+        uint64[] memory chains,
+        uint128[] memory contributions,
+        uint128 localContribution,
+        uint128 totalPool
+    ) {
+        RoundInfo storage round = rounds[roundId];
+        
+        uint256 chainCount = round.contributingChains.length + 2; // +2 for main and local
+        chains = new uint64[](chainCount);
+        contributions = new uint128[](chainCount);
+        
+        // Add contributing chains
+        for (uint256 i = 0; i < round.contributingChains.length; i++) {
+            chains[i] = round.contributingChains[i];
+            contributions[i] = round.chainContributions[round.contributingChains[i]];
+        }
+        
+        // Add main chain
+        chains[chainCount - 2] = ethereumChainSelector;
+        contributions[chainCount - 2] = round.mainChainContribution;
+        
+        // Add this chain
+        chains[chainCount - 1] = currentChainSelector;
+        contributions[chainCount - 1] = round.localPrizePool;
+        
+        localContribution = round.localPrizePool;
+        totalPool = round.totalChainPrizePool;
+    }
+
+    function getWithdrawableAmounts(address user) external view returns (
+        uint256 pendingAmount,
+        uint256[] memory roundIds,
+        uint256[] memory amounts,
+        bool[] memory hasWithdrawn
+    ) {
+        pendingAmount = pendingWithdrawalsBone[user];
+        
+        // Get last 10 rounds for user
+        uint256 startRound = currentRoundId > 10 ? currentRoundId - 10 : 1;
+        uint256 count = currentRoundId - startRound + 1;
+        
+        roundIds = new uint256[](count);
+        amounts = new uint256[](count);
+        hasWithdrawn = new bool[](count);
+        
+        for (uint256 i = 0; i < count; i++) {
+            uint256 roundId = startRound + i;
+            roundIds[i] = roundId;
+            amounts[i] = this.getWinnerShareFromThisChain(roundId, user);
+            hasWithdrawn[i] = amounts[i] == 0 || pendingAmount == 0;
+        }
+    }
+
     /**
      * @dev Get Shibarium-specific contract information
      */
@@ -689,6 +820,23 @@ contract CrossChainLotteryEntry is CCIPReceiver, ReentrancyGuard, Pausable {
             MAX_CLEANUP_BATCH,
             "Shibarium"
         );
+    }
+
+    // ===== INTERNAL HELPER FUNCTIONS =====
+
+    function handleEntryResponse(bytes memory data) external {
+        require(msg.sender == address(this), "Internal call only");
+        _handleEntryResponse(data);
+    }
+
+    function handleWinnersNotification(bytes memory data) external {
+        require(msg.sender == address(this), "Internal call only");
+        _handleWinnersNotification(data);
+    }
+
+    function handleRoundSync(bytes memory data) external {
+        require(msg.sender == address(this), "Internal call only");
+        _handleRoundSync(data);
     }
 
     // ===== ADMIN FUNCTIONS =====
@@ -749,6 +897,42 @@ contract CrossChainLotteryEntry is CCIPReceiver, ReentrancyGuard, Pausable {
         _unpause(); 
     }
 
+    // ===== ADMIN FUNCTIONS WITH ROUND SYNC =====
+
+    function emergencySetRound(uint256 newRoundId) external onlyAdmin {
+        if (newRoundId != currentRoundId) {
+            uint256 oldRound = currentRoundId;
+            currentRoundId = uint128(newRoundId);
+            emit RoundSynchronized(oldRound, newRoundId);
+        }
+    }
+
+    function manualSyncWithMainnet() external onlyAdmin {
+        // Send a sync request to mainnet
+        bytes memory data = abi.encode(
+            uint8(MessageType.ROUND_SYNC),
+            currentRoundId
+        );
+        
+        Client.EVM2AnyMessage memory ccipMessage = Client.EVM2AnyMessage({
+            receiver: abi.encode(ethereumMainContract),
+            data: data,
+            tokenAmounts: new Client.EVMTokenAmount[](0),
+            extraArgs: Client._argsToBytes(
+                Client.EVMExtraArgsV1({gasLimit: 100000})
+            ),
+            feeToken: address(0)
+        });
+        
+        try IRouterClient(getRouter()).ccipSend{
+            value: IRouterClient(getRouter()).getFee(ethereumChainSelector, ccipMessage)
+        }(ethereumChainSelector, ccipMessage) {
+            emit SecurityAlert("Manual sync requested", msg.sender, currentRoundId);
+        } catch {
+            revert("Sync request failed");
+        }
+    }
+
     // ===== EMERGENCY FUNCTIONS (Shibarium Adjusted) =====
 
     /**
@@ -778,10 +962,13 @@ contract CrossChainLotteryEntry is CCIPReceiver, ReentrancyGuard, Pausable {
     function emergencyProcessWinners(
         uint256 roundId,
         address[3] calldata winners,
-        uint256 chainPrizePool
+        uint256 chainPrizePool,
+        uint128 mainChainContribution,
+        uint64[] calldata chains,
+        uint128[] calldata contributions
     ) external onlyAdmin {
         if (roundId == 0) return;
-        _processRoundWinners(roundId, winners, chainPrizePool);
+        _processRoundWinners(roundId, winners, chainPrizePool, mainChainContribution, chains, contributions);
     }
 
     function requestEmergencyWithdrawal() external onlyAdmin {
@@ -844,8 +1031,7 @@ contract CrossChainLotteryEntry is CCIPReceiver, ReentrancyGuard, Pausable {
 
     function forceRoundSync(uint256 newRoundId) external onlyAdmin {
         if (newRoundId > currentRoundId) {
-            currentRoundId = uint128(newRoundId);
-            emit ContractSynced(newRoundId);
+            _syncToRound(newRoundId);
         }
     }
 
@@ -993,47 +1179,3 @@ contract CrossChainLotteryEntry is CCIPReceiver, ReentrancyGuard, Pausable {
         emit NativeBoneReceived(msg.sender, msg.value);
     }
 }
-
-/*
-===== SHIBARIUM-OPTIMIZED CROSS-CHAIN LOTTERY =====
-
-PRIZE DISTRIBUTION (SIMPLIFIED):
-💰 Winners: 60% (split among 3 winners = 20% each)
-💰 Developer: 5%
-💰 Funding Addresses: 35% (includes what would have been burned)
-💰 Total: 100% (clean and simple)
-
-SHIBARIUM-SPECIFIC ADJUSTMENTS:
-✅ Removed withdrawal limits (BONE is much cheaper than ETH)
-✅ Increased CCIP fee cap from 0.1 ETH to 1000 BONE
-✅ Higher CCIP fee buffer (50% vs 20%) for BONE volatility
-✅ Increased cleanup batch size (100 vs 50) for cheaper gas
-✅ Higher gas limits for transfers (10000 vs 2300)
-✅ Removed percentage-based fund recovery limits
-✅ Added batch operations for admin efficiency
-✅ Simplified prize distribution (35% funding vs 30%+5% split)
-✅ Shibarium-specific monitoring and helper functions
-
-BONE ECONOMICS:
-💰 Entry fee: 1 BONE (~$0.01-0.05 depending on market)
-💰 CCIP fees: 10-100 BONE typically (~$0.10-5.00)
-💰 Total entry cost: Usually under $10 vs $50-200 on Ethereum
-💰 No withdrawal limits: Users can withdraw any amount freely
-💰 Funding addresses get 35% total (simplified from 30% + 5%)
-
-SECURITY MAINTAINED:
-🔒 All critical security features preserved
-🔒 Reentrancy protection on all functions
-🔒 Emergency timelock mechanisms
-🔒 Access control and validation
-🔒 Error handling and fallbacks
-
-CROSS-CHAIN COMPATIBLE:
-🌐 Works with main Ethereum VRFLottery contract
-🌐 CCIP message formats maintained
-🌐 Winner notification system intact
-🌐 Round synchronization supported
-
-This contract is optimized for Shibarium's BONE economics while maintaining
-full compatibility with the main Ethereum lottery contract.
-*/

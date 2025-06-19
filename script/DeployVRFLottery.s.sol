@@ -29,7 +29,7 @@ contract DeployVRFLottery is Script {
         console.log("Deployer balance:", deployer.balance);
         console.log("Network: Sepolia Testnet");
         
-        require(deployer.balance > 0.1 ether, "Insufficient ETH for deployment");
+        require(deployer.balance > 0.05 ether, "Insufficient ETH for deployment");
         
         vm.startBroadcast(deployerPrivateKey);
         
@@ -93,33 +93,33 @@ contract DeployVRFLottery is Script {
         console.log("Pool tick spacing:", deployedPoolKey.tickSpacing);
         
         // Check pool price info
-        try lottery.getPoolPriceInfo() returns (
-            uint160 sqrtPriceX96,
-            uint256 bonePerEth,
-            uint256 ethNeededForEntry,
-            bool poolExists
-        ) {
-            console.log("=== Pool Price Info ===");
-            console.log("Pool exists:", poolExists);
-            if (poolExists) {
-                console.log("SqrtPriceX96:", sqrtPriceX96);
-                console.log("BONE per ETH:", bonePerEth);
-                console.log("ETH needed for entry:", ethNeededForEntry);
-            } else {
-                console.log("WARNING: Pool does not exist yet!");
-            }
-        } catch Error(string memory reason) {
-            console.log("Could not get pool price info:", reason);
-        }
+        // try lottery.getPoolPriceInfo() returns (
+        //     uint160 sqrtPriceX96,
+        //     uint256 bonePerEth,
+        //     uint256 ethNeededForEntry,
+        //     bool poolExists
+        // ) {
+        //     console.log("=== Pool Price Info ===");
+        //     console.log("Pool exists:", poolExists);
+        //     if (poolExists) {
+        //         console.log("SqrtPriceX96:", sqrtPriceX96);
+        //         console.log("BONE per ETH:", bonePerEth);
+        //         console.log("ETH needed for entry:", ethNeededForEntry);
+        //     } else {
+        //         console.log("WARNING: Pool does not exist yet!");
+        //     }
+        // } catch Error(string memory reason) {
+        //     console.log("Could not get pool price info:", reason);
+        // }
         
         // Check ETH entry availability
-        try lottery.canEnterWithETH() returns (bool available, string memory status) {
-            console.log("=== ETH Entry Status ===");
-            console.log("ETH entry available:", available);
-            console.log("Status:", status);
-        } catch Error(string memory reason) {
-            console.log("Could not check ETH entry status:", reason);
-        }
+        // try lottery.canEnterWithETH() returns (bool available, string memory status) {
+        //     console.log("=== ETH Entry Status ===");
+        //     console.log("ETH entry available:", available);
+        //     console.log("Status:", status);
+        // } catch Error(string memory reason) {
+        //     console.log("Could not check ETH entry status:", reason);
+        // }
         
         // Check optimal ETH amount
         try lottery.getOptimalETHAmount() returns (
@@ -246,43 +246,43 @@ contract TestVRFLotteryEntry is Script {
         console.log("Contract:", VRF_LOTTERY_CONTRACT);
         
         // Check if can enter with ETH
-        (bool ethAvailable, string memory ethStatus) = lottery.canEnterWithETH();
-        console.log("ETH entry available:", ethAvailable);
-        console.log("ETH status:", ethStatus);
+        // (bool ethAvailable, string memory ethStatus) = lottery.canEnterWithETH();
+        // console.log("ETH entry available:", ethAvailable);
+        // console.log("ETH status:", ethStatus);
         
-        if (ethAvailable) {
-            // Get optimal ETH amount
-            (uint256 optimalAmount, bool available, string memory message) = lottery.getOptimalETHAmount();
-            console.log("Optimal ETH amount:", optimalAmount);
-            console.log("Message:", message);
+        // if (ethAvailable) {
+        //     // Get optimal ETH amount
+        //     (uint256 optimalAmount, bool available, string memory message) = lottery.getOptimalETHAmount();
+        //     console.log("Optimal ETH amount:", optimalAmount);
+        //     console.log("Message:", message);
             
-            if (sender.balance >= optimalAmount) {
-                console.log("Entering lottery with ETH amount:", optimalAmount);
-                lottery.enterWithETH{value: optimalAmount}();
-                console.log("ETH entry successful!");
-            } else {
-                console.log("Insufficient ETH balance");
-            }
-        } else {
-            console.log("ETH entry not available, trying BONE entry...");
+        //     if (sender.balance >= optimalAmount) {
+        //         console.log("Entering lottery with ETH amount:", optimalAmount);
+        //         lottery.enterWithETH{value: optimalAmount}();
+        //         console.log("ETH entry successful!");
+        //     } else {
+        //         console.log("Insufficient ETH balance");
+        //     }
+        // } else {
+        //     console.log("ETH entry not available, trying BONE entry...");
             
-            // Check BONE balance and allowance
-            console.log("Sender BONE balance:", lottery.boneToken().balanceOf(sender));
-            console.log("BONE allowance:", lottery.boneToken().allowance(sender, address(lottery)));
+        //     // Check BONE balance and allowance
+        //     console.log("Sender BONE balance:", lottery.boneToken().balanceOf(sender));
+        //     console.log("BONE allowance:", lottery.boneToken().allowance(sender, address(lottery)));
             
-            uint256 entryFee = lottery.ENTRY_FEE_BONE();
-            if (lottery.boneToken().balanceOf(sender) >= entryFee) {
-                if (lottery.boneToken().allowance(sender, address(lottery)) >= entryFee) {
-                    lottery.enterWithBone();
-                    console.log("BONE entry successful!");
-                } else {
-                    console.log("Need to approve BONE tokens first");
-                    console.log("Run: BONE.approve(contract_address, entry_fee)");
-                }
-            } else {
-                console.log("Insufficient BONE balance");
-            }
-        }
+        //     uint256 entryFee = lottery.ENTRY_FEE_BONE();
+        //     if (lottery.boneToken().balanceOf(sender) >= entryFee) {
+        //         if (lottery.boneToken().allowance(sender, address(lottery)) >= entryFee) {
+        //             lottery.enterWithBone();
+        //             console.log("BONE entry successful!");
+        //         } else {
+        //             console.log("Need to approve BONE tokens first");
+        //             console.log("Run: BONE.approve(contract_address, entry_fee)");
+        //         }
+        //     } else {
+        //         console.log("Insufficient BONE balance");
+        //     }
+        // }
         
         // Check round status
         (uint256 playerCount, , address[3] memory winners, uint256 totalPrizePool, uint256 startTime) = lottery.getRoundInfo(lottery.currentRoundId());

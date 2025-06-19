@@ -59,6 +59,14 @@ contract VRFLottery is VRFV2PlusWrapperConsumerBase, CCIPReceiver, ReentrancyGua
     uint256 public constant MIN_BONE_PER_ETH = 10;
     uint256 public constant MAX_BONE_PER_ETH = 100000000;
 
+    // ===== MESSAGE TYPES =====
+    enum MessageType {
+        ENTRY_RESPONSE,
+        WINNERS_NOTIFICATION,
+        ROUND_SYNC,
+        ENTRY_REQUEST
+    }
+
     // ===== PACKED STRUCTS =====
     enum RoundState { Active, Full, VRFRequested, WinnersSelected, PrizesDistributed, Completed }
 
@@ -74,7 +82,7 @@ contract VRFLottery is VRFV2PlusWrapperConsumerBase, CCIPReceiver, ReentrancyGua
         uint128 totalPrizePoolBone;
         uint64 startTime;
         RoundState state;
-        uint256 vrfRequestId; // Store the VRF request ID for this round
+        uint256 vrfRequestId;
         mapping(uint64 => uint32) chainPlayerCounts;
         mapping(uint64 => uint128) chainPrizePools;
     }
@@ -118,6 +126,7 @@ contract VRFLottery is VRFV2PlusWrapperConsumerBase, CCIPReceiver, ReentrancyGua
     event CCIPFund(address indexed funder, uint256 amount);
     event CCIPFail(address indexed player, uint64 indexed chain, string reason);
     event WinNotify(uint64 indexed chain, uint256 indexed roundId);
+    event RoundSync(uint256 oldRound, uint256 newRound);
 
     // ===== ERRORS (shortened) =====
     error NotAdmin();
@@ -500,7 +509,7 @@ contract VRFLottery is VRFV2PlusWrapperConsumerBase, CCIPReceiver, ReentrancyGua
         delete request.randomWords;
 
         round.state = RoundState.VRFRequested;
-        round.vrfRequestId = requestId; // Store the request ID in the round
+        round.vrfRequestId = requestId;
         emit VRFReq(requestId, currentRoundId);
     }
 
@@ -574,27 +583,36 @@ contract VRFLottery is VRFV2PlusWrapperConsumerBase, CCIPReceiver, ReentrancyGua
         uint256 totalPrize = round.totalPrizePoolBone;
         if (totalPrize == 0) return;
 
-        uint256 winnersTotal = (totalPrize * WINNERS_SHARE) / 100;
-        uint256 devAmount = (totalPrize * DEV_SHARE) / 100;
-        uint256 fundingTotal = (totalPrize * FUNDING_SHARE) / 100;
+        // Calculate local chain's contribution
+        uint256 localContribution = totalPrize;
+        for (uint256 i = 0; i < configuredChains.length; i++) {
+            localContribution -= round.chainPrizePools[configuredChains[i]];
+        }
 
-        uint256 winnerAmount = winnersTotal / 3;
-        uint256 fundingPerAddress = fundingTotal / 5;
+        // Distribute based on local contribution
+        uint256 localWinnersTotal = (localContribution * WINNERS_SHARE) / 100;
+        uint256 localDevAmount = (localContribution * DEV_SHARE) / 100;
+        uint256 localFundingTotal = (localContribution * FUNDING_SHARE) / 100;
 
+        uint256 localWinnerAmount = localWinnersTotal / 3;
+        uint256 localFundingPerAddress = localFundingTotal / 5;
+
+        // Distribute to winners (proportional share from this chain)
         for (uint256 i; i < 3;) {
             if (round.winners[i] != address(0)) {
-                pendingWithdrawalsBone[round.winners[i]] += uint128(winnerAmount);
-                totalWinningsBone[round.winners[i]] += uint128(winnerAmount);
+                pendingWithdrawalsBone[round.winners[i]] += uint128(localWinnerAmount);
+                totalWinningsBone[round.winners[i]] += uint128(localWinnerAmount);
             }
             unchecked { ++i; }
         }
 
-        pendingWithdrawalsBone[devAddress] += uint128(devAmount);
-        totalWinningsBone[devAddress] += uint128(devAmount);
+        // Local dev and funding distribution
+        pendingWithdrawalsBone[devAddress] += uint128(localDevAmount);
+        totalWinningsBone[devAddress] += uint128(localDevAmount);
 
         for (uint256 i; i < 5;) {
-            pendingWithdrawalsBone[fundingAddresses[i]] += uint128(fundingPerAddress);
-            totalWinningsBone[fundingAddresses[i]] += uint128(fundingPerAddress);
+            pendingWithdrawalsBone[fundingAddresses[i]] += uint128(localFundingPerAddress);
+            totalWinningsBone[fundingAddresses[i]] += uint128(localFundingPerAddress);
             unchecked { ++i; }
         }
 
@@ -692,9 +710,21 @@ contract VRFLottery is VRFV2PlusWrapperConsumerBase, CCIPReceiver, ReentrancyGua
         burnSlippage = newSlippage;
     }
 
-    // ===== CCIP FUNCTIONS =====
-    function _sendEntryResponse(address player, bool approved, string memory reason, uint64 destinationChain, address destinationContract) internal {
-        bytes memory data = abi.encode(player, approved, reason);
+    // ===== UPDATED CCIP FUNCTIONS =====
+    function _sendEntryResponse(
+        address player, 
+        bool approved, 
+        string memory reason, 
+        uint64 destinationChain, 
+        address destinationContract
+    ) internal {
+        bytes memory data = abi.encode(
+            uint8(MessageType.ENTRY_RESPONSE),
+            currentRoundId, // Include current round for sync
+            player,
+            approved,
+            reason
+        );
         
         Client.EVM2AnyMessage memory ccipMessage = Client.EVM2AnyMessage({
             receiver: abi.encode(destinationContract),
@@ -709,25 +739,50 @@ contract VRFLottery is VRFV2PlusWrapperConsumerBase, CCIPReceiver, ReentrancyGua
         }(destinationChain, ccipMessage) {
             // Success
         } catch {
-            emit CCIPFail(player, destinationChain, "Entry fail");
+            emit CCIPFail(player, destinationChain, "Entry response failed");
         }
     }
 
     function _notifyCrossChainWinners(uint256 roundId) internal {
         LotteryRound storage round = lotteryRounds[roundId];
         
-        for (uint256 i = 0; i < configuredChains.length; i++) {
+        // Build chain contributions array
+        uint256 chainCount = configuredChains.length;
+        uint64[] memory chains = new uint64[](chainCount);
+        uint128[] memory contributions = new uint128[](chainCount);
+        
+        for (uint256 i = 0; i < chainCount; i++) {
             uint64 chainSelector = configuredChains[i];
+            chains[i] = chainSelector;
+            contributions[i] = round.chainPrizePools[chainSelector];
+        }
+        
+        // Calculate this chain's contribution
+        uint128 thisChainContribution = round.totalPrizePoolBone;
+        for (uint256 i = 0; i < chainCount; i++) {
+            thisChainContribution -= contributions[i];
+        }
+        
+        for (uint256 i = 0; i < chainCount; i++) {
+            uint64 chainSelector = chains[i];
             address contractAddress = chainContracts[chainSelector];
             
             if (contractAddress != address(0)) {
-                bytes memory data = abi.encode(roundId, round.winners, round.totalPrizePoolBone);
+                bytes memory data = abi.encode(
+                    uint8(MessageType.WINNERS_NOTIFICATION),
+                    roundId,
+                    round.winners,
+                    round.totalPrizePoolBone,
+                    thisChainContribution, // This chain's contribution
+                    chains,                // All chain selectors
+                    contributions         // All chain contributions
+                );
                 
                 Client.EVM2AnyMessage memory ccipMessage = Client.EVM2AnyMessage({
                     receiver: abi.encode(contractAddress),
                     data: data,
                     tokenAmounts: new Client.EVMTokenAmount[](0),
-                    extraArgs: Client._argsToBytes(Client.EVMExtraArgsV1({gasLimit: 300000})),
+                    extraArgs: Client._argsToBytes(Client.EVMExtraArgsV1({gasLimit: 400000})),
                     feeToken: address(0)
                 });
 
@@ -736,7 +791,7 @@ contract VRFLottery is VRFV2PlusWrapperConsumerBase, CCIPReceiver, ReentrancyGua
                 }(chainSelector, ccipMessage) {
                     emit WinNotify(chainSelector, roundId);
                 } catch {
-                    emit CCIPFail(address(0), chainSelector, "Win notify fail");
+                    emit CCIPFail(address(0), chainSelector, "Winners notification failed");
                 }
             }
         }
@@ -746,8 +801,33 @@ contract VRFLottery is VRFV2PlusWrapperConsumerBase, CCIPReceiver, ReentrancyGua
         uint64 sourceChain = message.sourceChainSelector;
         if (!allowedChains[sourceChain]) revert ChainNotOK();
 
-        (address player, uint256 boneAmount) = abi.decode(message.data, (address, uint256));
+        bytes memory data = message.data;
+        uint8 messageType = uint8(data[0]);
         
+        if (messageType == uint8(MessageType.ENTRY_REQUEST)) {
+            (
+                ,
+                uint256 remoteRoundId,
+                address player,
+                uint256 boneAmount
+            ) = abi.decode(data, (uint8, uint256, address, uint256));
+            
+            // Sync round if remote is ahead
+            if (remoteRoundId > currentRoundId) {
+                _syncToRound(remoteRoundId);
+            }
+            
+            _processEntryRequest(player, boneAmount, sourceChain);
+        } else if (messageType == uint8(MessageType.ROUND_SYNC)) {
+            (, uint256 remoteRoundId) = abi.decode(data, (uint8, uint256));
+            
+            if (remoteRoundId > currentRoundId) {
+                _syncToRound(remoteRoundId);
+            }
+        }
+    }
+
+    function _processEntryRequest(address player, uint256 boneAmount, uint64 sourceChain) internal {
         bool hasNFT = nftContract.balanceOf(player) > 0;
         string memory reason = hasNFT ? "OK" : "No NFT";
         address targetContract = chainContracts[sourceChain];
@@ -786,28 +866,40 @@ contract VRFLottery is VRFV2PlusWrapperConsumerBase, CCIPReceiver, ReentrancyGua
         }
     }
 
+    function _syncToRound(uint256 newRoundId) internal {
+        if (newRoundId <= currentRoundId) return;
+        
+        uint256 oldRound = currentRoundId;
+        
+        // Complete current round if needed
+        LotteryRound storage currentRound = lotteryRounds[currentRoundId];
+        if (currentRound.state != RoundState.Completed) {
+            currentRound.state = RoundState.Completed;
+        }
+        
+        currentRoundId = uint128(newRoundId);
+        
+        // Initialize new round
+        LotteryRound storage newRound = lotteryRounds[currentRoundId];
+        newRound.state = RoundState.Active;
+        newRound.startTime = uint64(block.timestamp);
+        
+        emit RoundSync(oldRound, newRoundId);
+        emit NewRound(currentRoundId);
+    }
+
     function fundCCIPResponses() external payable {
         require(msg.value > 0, "Need ETH");
         emit CCIPFund(msg.sender, msg.value);
     }
 
     function getCCIPResponseCosts() external view returns (uint256 entryResponseCost, uint256 winnersNotificationCost, uint256 totalEstimatedCost) {
-        bytes memory entryData = abi.encode(address(0), true, "test");
+        bytes memory entryData = abi.encode(uint8(MessageType.ENTRY_RESPONSE), currentRoundId, address(0), true, "test");
         Client.EVM2AnyMessage memory entryMessage = Client.EVM2AnyMessage({
             receiver: abi.encode(address(0)),
             data: entryData,
             tokenAmounts: new Client.EVMTokenAmount[](0),
             extraArgs: Client._argsToBytes(Client.EVMExtraArgsV1({gasLimit: 200000})),
-            feeToken: address(0)
-        });
-        
-        address[3] memory dummyWinners;
-        bytes memory winnersData = abi.encode(1, dummyWinners, uint256(4 ether));
-        Client.EVM2AnyMessage memory winnersMessage = Client.EVM2AnyMessage({
-            receiver: abi.encode(address(0)),
-            data: winnersData,
-            tokenAmounts: new Client.EVMTokenAmount[](0),
-            extraArgs: Client._argsToBytes(Client.EVMExtraArgsV1({gasLimit: 300000})),
             feeToken: address(0)
         });
         
@@ -819,28 +911,25 @@ contract VRFLottery is VRFV2PlusWrapperConsumerBase, CCIPReceiver, ReentrancyGua
                 entryResponseCost = 0.001 ether;
             }
             
-            try IRouterClient(i_ccipRouter).getFee(exampleChain, winnersMessage) returns (uint256 winnersCost) {
-                winnersNotificationCost = winnersCost;
-            } catch {
-                winnersNotificationCost = 0.002 ether;
-            }
+            // Estimate winners notification cost (larger message)
+            winnersNotificationCost = entryResponseCost * 2;
         }
         
         totalEstimatedCost = (entryResponseCost * 4) + (winnersNotificationCost * configuredChains.length);
     }
 
-    // ===== VIEW FUNCTIONS =====
-    function canEnterWithETH() external view returns (bool available, string memory status) {
-        (, bool valid) = _calculateETHRequired();
+    // ===== NEW VIEW FUNCTIONS =====
+    // function canEnterWithETH() external view returns (bool available, string memory status) {
+    //     (, bool valid) = _calculateETHRequired();
         
-        if (valid) {
-            available = true;
-            status = "ETH OK";
-        } else {
-            available = false;
-            status = "ETH unavailable";
-        }
-    }
+    //     if (valid) {
+    //         available = true;
+    //         status = "ETH OK";
+    //     } else {
+    //         available = false;
+    //         status = "ETH unavailable";
+    //     }
+    // }
 
     function getCurrentRoundPlayers() external view returns (Player[] memory) {
         return lotteryRounds[currentRoundId].players;
@@ -872,14 +961,60 @@ contract VRFLottery is VRFV2PlusWrapperConsumerBase, CCIPReceiver, ReentrancyGua
         return valid ? ethRequired : 0;
     }
 
-    function getPoolPriceInfo() external view returns (uint160 sqrtPriceX96, uint256 bonePerEth, uint256 ethNeededForEntry, bool poolExists) {
-        (sqrtPriceX96,,,) = poolManager.getSlot0(boneEthPoolKey.toId());
-        poolExists = sqrtPriceX96 > 0;
-        (bonePerEth, ) = _getBonePriceFromPool();
+    // function getPoolPriceInfo() external view returns (uint160 sqrtPriceX96, uint256 bonePerEth, uint256 ethNeededForEntry, bool poolExists) {
+    //     (sqrtPriceX96,,,) = poolManager.getSlot0(boneEthPoolKey.toId());
+    //     poolExists = sqrtPriceX96 > 0;
+    //     (bonePerEth, ) = _getBonePriceFromPool();
         
-        (uint256 ethRequired, bool calcValid) = _calculateETHRequired();
-        ethNeededForEntry = calcValid ? ethRequired : 0;
-    }
+    //     (uint256 ethRequired, bool calcValid) = _calculateETHRequired();
+    //     ethNeededForEntry = calcValid ? ethRequired : 0;
+    // }
+
+    // function getChainContributions(uint256 roundId) external view returns (
+    //     uint64[] memory chains,
+    //     uint128[] memory contributions,
+    //     uint128 localContribution
+    // ) {
+    //     LotteryRound storage round = lotteryRounds[roundId];
+    //     uint256 chainCount = configuredChains.length;
+        
+    //     chains = new uint64[](chainCount);
+    //     contributions = new uint128[](chainCount);
+        
+    //     localContribution = round.totalPrizePoolBone;
+        
+    //     for (uint256 i = 0; i < chainCount; i++) {
+    //         uint64 chainSelector = configuredChains[i];
+    //         chains[i] = chainSelector;
+    //         contributions[i] = round.chainPrizePools[chainSelector];
+    //         localContribution -= contributions[i];
+    //     }
+    // }
+
+    // function getWinnerShareFromChain(uint256 roundId, address winner) external view returns (uint256) {
+    //     LotteryRound storage round = lotteryRounds[roundId];
+        
+    //     // Check if address is a winner
+    //     bool isWinner = false;
+    //     for (uint256 i = 0; i < 3; i++) {
+    //         if (round.winners[i] == winner) {
+    //             isWinner = true;
+    //             break;
+    //         }
+    //     }
+        
+    //     if (!isWinner || round.totalPrizePoolBone == 0) return 0;
+        
+    //     // Calculate local contribution
+    //     uint256 localContribution = round.totalPrizePoolBone;
+    //     for (uint256 i = 0; i < configuredChains.length; i++) {
+    //         localContribution -= round.chainPrizePools[configuredChains[i]];
+    //     }
+        
+    //     // Calculate winner's share from this chain
+    //     uint256 localWinnersTotal = (localContribution * WINNERS_SHARE) / 100;
+    //     return localWinnersTotal / 3;
+    // }
 
     // ===== ADMIN FUNCTIONS =====
     function updatePoolKey(PoolKey memory _newPoolKey) external onlyAdmin {
@@ -907,17 +1042,17 @@ contract VRFLottery is VRFV2PlusWrapperConsumerBase, CCIPReceiver, ReentrancyGua
         _selectWinnersOnly(roundId, randomWords);
     }
 
-    function emergencyWithdrawTokens(address token, uint256 amount) external onlyAdmin {
-        require(token != address(boneToken) || amount <= boneToken.balanceOf(address(this)) / 10, "Max 10% BONE");
-        IERC20(token).transfer(contractAdmin, amount);
-    }
+    // function emergencyWithdrawTokens(address token, uint256 amount) external onlyAdmin {
+    //     require(token != address(boneToken) || amount <= boneToken.balanceOf(address(this)) / 10, "Max 10% BONE");
+    //     IERC20(token).transfer(contractAdmin, amount);
+    // }
 
-    function emergencyWithdrawETH() external onlyAdmin {
-        uint256 balance = address(this).balance;
-        (bool success,) = contractAdmin.call{value: balance}("");
-        require(success, "ETH fail");
-        emit ETHOut(contractAdmin, balance);
-    }
+    // function emergencyWithdrawETH() external onlyAdmin {
+    //     uint256 balance = address(this).balance;
+    //     (bool success,) = contractAdmin.call{value: balance}("");
+    //     require(success, "ETH fail");
+    //     emit ETHOut(contractAdmin, balance);
+    // }
 
     function setVRFConfig(uint32 _callbackGasLimit, uint16 _requestConfirmations, uint32 _numWords) external onlyAdmin {
         vrfConfig = (_callbackGasLimit << 8) | (_requestConfirmations << 4) | _numWords;
@@ -964,13 +1099,27 @@ contract VRFLottery is VRFV2PlusWrapperConsumerBase, CCIPReceiver, ReentrancyGua
         address contractAddress = chainContracts[destinationChain];
         require(contractAddress != address(0), "Chain not set");
         
-        bytes memory data = abi.encode(roundId, round.winners, round.totalPrizePoolBone);
+        // Build single chain data for emergency notification
+        uint64[] memory chains = new uint64[](1);
+        uint128[] memory contributions = new uint128[](1);
+        chains[0] = currentChainSelector;
+        contributions[0] = round.totalPrizePoolBone;
+        
+        bytes memory data = abi.encode(
+            uint8(MessageType.WINNERS_NOTIFICATION),
+            roundId,
+            round.winners,
+            round.totalPrizePoolBone,
+            round.totalPrizePoolBone,
+            chains,
+            contributions
+        );
         
         Client.EVM2AnyMessage memory ccipMessage = Client.EVM2AnyMessage({
             receiver: abi.encode(contractAddress),
             data: data,
             tokenAmounts: new Client.EVMTokenAmount[](0),
-            extraArgs: Client._argsToBytes(Client.EVMExtraArgsV1({gasLimit: 300000})),
+            extraArgs: Client._argsToBytes(Client.EVMExtraArgsV1({gasLimit: 400000})),
             feeToken: address(0)
         });
 
@@ -979,6 +1128,12 @@ contract VRFLottery is VRFV2PlusWrapperConsumerBase, CCIPReceiver, ReentrancyGua
         }(destinationChain, ccipMessage);
         
         emit WinNotify(destinationChain, roundId);
+    }
+
+    function forceRoundSync(uint256 newRoundId) external onlyAdmin {
+        if (newRoundId > currentRoundId) {
+            _syncToRound(newRoundId);
+        }
     }
 
     // ===== FALLBACK FUNCTIONS =====
