@@ -19,7 +19,7 @@ contract DeployCrossChainLottery is Script {
             ccipRouter: 0x449E234FEDF3F907b9E9Dd6BAf1ddc36664097E5, // Puppynet CCIP Router
             puppynetChainSelector: 17833296867764334567, // Update with actual Puppynet selector
             sepoliaChainSelector: 16015286601757825753, // Sepolia chain selector
-            ethereumMainContract: 0xFC693f60FE0781CCB0Fe07f681381B78a022986a // Your latest main contract
+            ethereumMainContract: 0xe5F919CF96Cd14EfFCc31230588f424b71e09244 // Your latest main contract
         });
     }
     

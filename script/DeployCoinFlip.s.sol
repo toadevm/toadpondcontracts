@@ -6,8 +6,8 @@ import {CoinFlip} from "../src/CoinFlip.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
- * @title Comprehensive CoinFlip Deployment Script
- * @dev Handles deployment, configuration, and initial setup with NFT requirements and donor system
+ * @title CoinFlip Deployment Script with Gas Analysis
+ * @dev Handles deployment with detailed gas cost analysis
  */
 contract DeployCoinFlip is Script {
     
@@ -154,64 +154,47 @@ contract DeployCoinFlip is Script {
         
         console.log("Contract deployed at:", deployedContract);
         console.log("Deployment block:", deploymentBlock);
-        console.log("Gas used for deployment:", gasleft());
-        
-        // Setup gas tokens if pools are provided
-        address toadPool = vm.envOr("TOAD_WETH_POOL", address(0));
-        address bonePool = vm.envOr("BONE_WETH_POOL", address(0));
-        
-        if (toadPool != address(0)) {
-            console.log("Setting up TOAD DEX oracle...");
-            bool toadToken0IsWETH = vm.envOr("TOAD_TOKEN0_IS_WETH", false);
-            uint128 toadMinLiquidity = uint128(vm.envOr("TOAD_MIN_LIQUIDITY", uint256(1000000)));
-            
-            coinFlip.setupGasToken(
-                toadToken,
-                toadPool,
-                toadToken0IsWETH,
-                toadMinLiquidity,
-                300 // 5 minutes
-            );
-            console.log("TOAD DEX oracle configured");
-        } else {
-            console.log("No TOAD pool provided - skipping DEX oracle setup");
-        }
-        
-        if (bonePool != address(0)) {
-            console.log("Setting up BONE DEX oracle...");
-            bool boneToken0IsWETH = vm.envOr("BONE_TOKEN0_IS_WETH", false);
-            uint128 boneMinLiquidity = uint128(vm.envOr("BONE_MIN_LIQUIDITY", uint256(500000)));
-            
-            coinFlip.setupGasToken(
-                boneToken,
-                bonePool,
-                boneToken0IsWETH,
-                boneMinLiquidity,
-                300 // 5 minutes
-            );
-            console.log("BONE DEX oracle configured");
-        } else {
-            console.log("No BONE pool provided - skipping DEX oracle setup");
-        }
-        
-        // Fund contract with LINK if specified
-        uint256 linkFunding = vm.envOr("INITIAL_LINK_FUNDING", uint256(0));
-        if (linkFunding > 0) {
-            console.log("Funding contract with", linkFunding / 1e18, "LINK");
-            IERC20(config.linkToken).transfer(deployedContract, linkFunding);
-        }
         
         vm.stopBroadcast();
+        
+        // Calculate deployment costs
+        uint256 bytecodeSize = deployedContract.code.length;
+        uint256 gasUsed = 21000 + (bytecodeSize * 200) + 500000; // Estimate for CoinFlip
+        
+        console.log("=== DEPLOYMENT COST ANALYSIS ===");
+        console.log("Contract bytecode size:", bytecodeSize, "bytes");
+        console.log("Estimated gas used:", gasUsed);
+        console.log("Gas breakdown:");
+        console.log("  - Base deployment cost: 21,000 gas");
+        console.log("  - Bytecode cost:", bytecodeSize * 200, "gas");
+        console.log("  - Constructor execution: ~500,000 gas");
+        
+        // Gas price scenarios with ETH conversion
+        console.log("\n=== Cost at Different Gas Prices ===");
+        
+        // Calculate costs in wei, then convert to ETH (divide by 1e18)
+        uint256 lowCostWei = gasUsed * 500000000; // 0.5 gwei in wei
+        uint256 normalCostWei = gasUsed * 2000000000; // 2 gwei in wei  
+        uint256 highCostWei = gasUsed * 10000000000; // 10 gwei in wei
+        uint256 veryHighCostWei = gasUsed * 20000000000; // 20 gwei in wei
+        
+        console.log("Low (0.5 gwei):", lowCostWei / 1e18, "ETH");
+        console.log("Normal (2 gwei):", normalCostWei / 1e18, "ETH");
+        console.log("High (10 gwei):", highCostWei / 1e18, "ETH");
+        console.log("Very High (20 gwei):", veryHighCostWei / 1e18, "ETH");
         
         // Post-deployment verification
         _verifyDeployment(config);
         _printInstructions();
         
-        console.log("=== DEPLOYMENT COMPLETE ===");
+        console.log("\n=== DEPLOYMENT COMPLETE ===");
+        console.log("Contract Address:", deployedContract);
+        console.log("Network:", config.name);
+        console.log("Status: Ready for CoinFlip games");
     }
     
     function _verifyDeployment(NetworkConfig memory config) internal view {
-        console.log("=== DEPLOYMENT VERIFICATION ===");
+        console.log("\n=== DEPLOYMENT VERIFICATION ===");
         
         // Verify contract deployed correctly
         require(deployedContract.code.length > 0, "Contract deployment failed");
@@ -229,7 +212,6 @@ contract DeployCoinFlip is Script {
         address[6] memory deployedDonors = coinFlip.getDonors();
         for (uint256 i = 0; i < 6; i++) {
             require(deployedDonors[i] != address(0), "Donor address not set");
-            console.log("  Donor", i + 1, "verified:", deployedDonors[i]);
         }
         console.log(" All 6 donors configured correctly");
         
@@ -249,144 +231,26 @@ contract DeployCoinFlip is Script {
         if (linkBalance >= 1e18) {
             console.log(" Sufficient LINK balance");
         } else {
-            console.log("  Low LINK balance - fund contract for VRF");
+            console.log(" Low LINK balance - fund contract for VRF");
         }
         
-        console.log("Contract can afford VRF:", coinFlip.canAffordVRF());
+        console.log("Can afford VRF:", coinFlip.canAffordVRF());
         console.log("Platform fee percentage:", coinFlip.PLATFORM_FEE_PERCENT(), "%");
     }
     
     function _printInstructions() internal view {
-        console.log("=== NEXT STEPS ===");
-        console.log("1. Update .env with deployed contract address:");
-        console.log("   COINFLIP_ADDRESS=%s", deployedContract);
-        console.log("");
-        console.log("2. Fund contract with LINK tokens:");
+        console.log("\n=== NEXT STEPS ===");
+        console.log("1. Fund contract with LINK tokens:");
         console.log("   Recommended: 10+ LINK for ~40 games");
-        console.log("   cast send %s 'transfer(address,uint256)' %s 10000000000000000000 --rpc-url $RPC_URL --private-key $PRIVATE_KEY", 
-                   coinFlip.LINK_TOKEN(), deployedContract);
         console.log("");
-        console.log("3. Verify Frog Soup NFT requirement:");
+        console.log("2. Verify Frog Soup NFT requirement:");
         console.log("   Players need at least 1 NFT from:", coinFlip.getFrogSoupNFT());
-        console.log("   Test with: cast call %s 'canUserPlay(address)' <user_address>", deployedContract);
         console.log("");
-        console.log("4. Donors can withdraw fees using:");
-        console.log("   cast send %s 'withdrawDonorFees(address)' <token_address>", deployedContract);
+        console.log("3. Donors can withdraw fees using:");
         console.log("   Each donor gets ~0.833%% of each game pot (5%% / 6 donors)");
         console.log("");
-        console.log("5. If no DEX pools configured, set up Uniswap V3 pools:");
-        console.log("   - Create TOAD/WETH and BONE/WETH pools");
-        console.log("   - Add liquidity (>$10k recommended)");
-        console.log("   - Configure oracles using setupGasToken()");
+        console.log("4. Test with small amounts first");
         console.log("");
-        console.log("6. Test with small amounts first:");
-        console.log("   forge script script/TestScript.s.sol --rpc-url $RPC_URL --broadcast");
-        console.log("");
-        console.log("7. Verify contract on Etherscan:");
-        console.log("   forge verify-contract %s src/CoinFlip.sol:CoinFlip --etherscan-api-key $ETHERSCAN_API_KEY", deployedContract);
-    }
-    
-    /**
-     * @dev Emergency function to setup gas tokens post-deployment
-     */
-    function setupGasTokens() external {
-        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
-        address contractAddress = vm.envAddress("COINFLIP_ADDRESS");
-        
-        CoinFlip coinFlipContract = CoinFlip(payable(contractAddress));
-        
-        vm.startBroadcast(deployerPrivateKey);
-        
-        console.log("=== SETTING UP GAS TOKENS ===");
-        
-        // Setup TOAD
-        address toadPool = vm.envAddress("TOAD_WETH_POOL");
-        bool toadToken0IsWETH = vm.envBool("TOAD_TOKEN0_IS_WETH");
-        uint128 toadMinLiquidity = uint128(vm.envUint("TOAD_MIN_LIQUIDITY"));
-        
-        coinFlipContract.setupGasToken(
-            coinFlipContract.TOAD_TOKEN(),
-            toadPool,
-            toadToken0IsWETH,
-            toadMinLiquidity,
-            300
-        );
-        console.log(" TOAD configured");
-        
-        // Setup BONE
-        address bonePool = vm.envAddress("BONE_WETH_POOL");
-        bool boneToken0IsWETH = vm.envBool("BONE_TOKEN0_IS_WETH");
-        uint128 boneMinLiquidity = uint128(vm.envUint("BONE_MIN_LIQUIDITY"));
-        
-        coinFlipContract.setupGasToken(
-            coinFlipContract.BONE_TOKEN(),
-            bonePool,
-            boneToken0IsWETH,
-            boneMinLiquidity,
-            300
-        );
-        console.log(" BONE configured");
-        
-        vm.stopBroadcast();
-        
-        console.log("Gas tokens setup complete!");
-    }
-    
-    /**
-     * @dev Fund contract with LINK tokens
-     */
-    function fundWithLink() external {
-        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
-        address contractAddress = vm.envAddress("COINFLIP_ADDRESS");
-        uint256 linkAmount = vm.envUint("LINK_AMOUNT") * 1e18; // Convert to wei
-        
-        uint256 chainId = block.chainid;
-        NetworkConfig memory config = networkConfigs[chainId];
-        
-        vm.startBroadcast(deployerPrivateKey);
-        
-        console.log("=== FUNDING WITH LINK ===");
-        console.log("Contract:", contractAddress);
-        console.log("Amount:", linkAmount / 1e18, "LINK");
-        
-        IERC20(config.linkToken).transfer(contractAddress, linkAmount);
-        
-        console.log(" Contract funded with LINK");
-        
-        // Verify funding
-        CoinFlip coinFlipContract = CoinFlip(payable(contractAddress));
-        uint256 newBalance = coinFlipContract.getLinkBalance();
-        console.log("New LINK balance:", newBalance / 1e18, "LINK");
-        console.log("Can afford VRF:", coinFlipContract.canAffordVRF());
-        
-        vm.stopBroadcast();
-    }
-    
-    /**
-     * @dev Update donor address (owner only)
-     */
-    function updateDonor() external {
-        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
-        address contractAddress = vm.envAddress("COINFLIP_ADDRESS");
-        uint256 donorIndex = vm.envUint("DONOR_INDEX"); // 0-5
-        address newDonor = vm.envAddress("NEW_DONOR_ADDRESS");
-        
-        CoinFlip coinFlipContract = CoinFlip(payable(contractAddress));
-        
-        vm.startBroadcast(deployerPrivateKey);
-        
-        console.log("=== UPDATING DONOR ===");
-        console.log("Contract:", contractAddress);
-        console.log("Donor Index:", donorIndex);
-        console.log("New Donor:", newDonor);
-        
-        address[6] memory currentDonors = coinFlipContract.getDonors();
-        console.log("Current Donor:", currentDonors[donorIndex]);
-        
-        coinFlipContract.updateDonor(donorIndex, newDonor);
-        
-        console.log(" Donor updated successfully");
-        
-        vm.stopBroadcast();
+        console.log("5. Verify contract on Etherscan");
     }
 }
