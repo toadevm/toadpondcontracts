@@ -2,12 +2,12 @@
 pragma solidity 0.8.30;
 
 // Chainlink VRF and CCIP imports
-import {VRFV2PlusWrapperConsumerBase} from "@chainlink/contracts/src/v0.8/vrf/dev/VRFV2PlusWrapperConsumerBase.sol";
-import {CCIPReceiver} from "@chainlink/contracts/src/v0.8/ccip/applications/CCIPReceiver.sol";
 import {Client} from "@chainlink/contracts/src/v0.8/ccip/libraries/Client.sol";
-import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
-import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {IRouterClient} from "@chainlink/contracts/src/v0.8/ccip/interfaces/IRouterClient.sol";
+import {CCIPReceiver} from "@chainlink/contracts/src/v0.8/ccip/applications/CCIPReceiver.sol";
+import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
+import {VRFV2PlusWrapperConsumerBase} from "@chainlink/contracts/src/v0.8/vrf/dev/VRFV2PlusWrapperConsumerBase.sol";
+import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 
 // OpenZeppelin imports
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -61,8 +61,8 @@ contract VRFLottery is
         0x0194d984f4445a3a0F4D0A6BD6D7c7fFba5363Bf;
     address public constant WETH = 0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14;
 
-    uint256 public constant ENTRY_FEE_BONE = 1 ether;
-    uint8 public constant MAX_PLAYERS = 4;
+    uint256 public entryFeeBone = 100 ether;
+    uint8 public constant MAX_PLAYERS = 10;
     uint8 public constant POINTS_PER_ENTRY = 5;
     uint8 public constant WINNERS_SHARE = 60;
     uint8 public constant DEV_SHARE = 5;
@@ -122,45 +122,18 @@ contract VRFLottery is
         uint256 burnCount;
     }
 
-    // ===== EVENTS (shortened names) =====
+    // ===== EVENTS  =====
     event Enter(
         address indexed player,
         uint64 indexed sourceChain,
         bool paidWithETH
     );
-    event ReEntry(address indexed winner, uint256 amount, uint256 roundId);
-    event Swapped(
-        address indexed player,
-        uint256 ethSent,
-        uint256 ethUsed,
-        uint256 ethRefunded,
-        uint256 boneReceived
-    );
+
     event CrossEntry(address indexed player, uint64 sourceChain);
     event Full(uint256 indexed roundId);
-    event VRFReq(uint256 indexed requestId, uint256 roundId);
     event VRFDone(uint256 indexed requestId, uint256 roundId);
     event Winners(address[3] winners, uint256 roundId);
-    event Prizes(uint256 roundId, uint256 totalPrizes);
-    event Complete(uint256 indexed roundId, uint256 newRoundId);
     event Withdraw(address indexed recipient, uint256 amount);
-    event NewRound(uint256 indexed roundId);
-    event Cycle(uint256 indexed roundId);
-    event BurnAcc(uint256 amount, uint256 totalAccumulated);
-    event TOADBuy(uint256 boneSpent, uint256 toadReceived, address[] swapPath);
-    event TOADBurn(uint256 toadAmount, address burner);
-    event RouteUpd(address[] newRoute, address updater);
-    event Burned(uint256 amount);
-    event PriceUpd(
-        uint256 ethPriceUSD,
-        uint256 poolBonePerETH,
-        uint256 ethRequired
-    );
-    event SlippageAdj(uint256 oldSlippage, uint256 newSlippage, string reason);
-    event AdminChg(address indexed previousAdmin, address indexed newAdmin);
-    event PoolUpd(PoolKey newPoolKey);
-    event ETHOut(address indexed recipient, uint256 amount);
-    event CCIPFund(address indexed funder, uint256 amount);
     event CCIPFail(address indexed player, uint64 indexed chain, string reason);
     event WinNotify(uint64 indexed chain, uint256 indexed roundId);
     event RoundSync(uint256 oldRound, uint256 newRound);
@@ -177,6 +150,12 @@ contract VRFLottery is
         uint256 amount
     );
     event CCIPRejected(uint64 sourceChain, string reason);
+    event EntryResponse(
+        address indexed player,
+        uint64 indexed sourceChain,
+        bool accepted,
+        string reason
+    );
 
     // ===== ERRORS (shortened) =====
     error NotAdmin();
@@ -237,12 +216,13 @@ contract VRFLottery is
 
     PoolKey public boneEthPoolKey;
     uint128 public currentRoundId;
-    uint32 public vrfConfig; // packed: callbackGasLimit(24) + requestConfirmations(4) + numWords(4)
+    uint32 public vrfConfig;
     address[] public toadBurnRoute;
     uint256 public burnSlippage = 1000;
     BurnData public burnData;
     address payable[5] public fundingAddresses;
     uint64[] public configuredChains;
+    uint32 public ccipGasLimit = 400000;
 
     mapping(uint64 => bool) public allowedChains;
     mapping(uint64 => address) public chainContracts;
@@ -274,7 +254,6 @@ contract VRFLottery is
         }
 
         contractAdmin = _devAddress;
-        emit AdminChg(address(0), _devAddress);
 
         currentChainSelector = _currentChainSelector;
         nftContract = IERC721(_nftContract);
@@ -295,14 +274,12 @@ contract VRFLottery is
             type(uint256).max
         );
 
-        // Pack VRF config: callbackGasLimit(300000) + requestConfirmations(3) + numWords(3)
-        vrfConfig = (300000 << 8) | (3 << 4) | 3;
+        // Pack VRF config: callbackGasLimit(500000) + requestConfirmations(3) + numWords(3)
+        vrfConfig = (2000000 << 8) | (3 << 4) | 3;
 
         currentRoundId = 1;
         lotteryRounds[1].state = RoundState.Active;
         lotteryRounds[1].startTime = uint64(block.timestamp);
-
-        emit NewRound(1);
     }
 
     // ===== INTERNAL HELPERS =====
@@ -388,7 +365,7 @@ contract VRFLottery is
 
         if (!poolValid || poolBonePerETH == 0) return (0, false);
 
-        ethRequired = ENTRY_FEE_BONE / poolBonePerETH;
+        ethRequired = entryFeeBone / poolBonePerETH;
         ethRequired = (ethRequired * (10000 + baseSlippage)) / 10000;
 
         valid = ethRequired >= 0.00001 ether && ethRequired <= 5 ether;
@@ -402,9 +379,9 @@ contract VRFLottery is
         onlyActiveRound
     {
         if (nftContract.balanceOf(msg.sender) == 0) revert NoNFT();
-        if (boneToken.balanceOf(msg.sender) < ENTRY_FEE_BONE) revert LowBone();
+        if (boneToken.balanceOf(msg.sender) < entryFeeBone) revert LowBone();
 
-        boneToken.transferFrom(msg.sender, address(this), ENTRY_FEE_BONE);
+        boneToken.transferFrom(msg.sender, address(this), entryFeeBone);
         _addPlayerToRound(msg.sender, currentChainSelector, true, false, false);
 
         emit Enter(msg.sender, currentChainSelector, false);
@@ -419,12 +396,11 @@ contract VRFLottery is
         if (nftContract.balanceOf(msg.sender) == 0) revert NoNFT();
 
         uint256 pendingAmount = pendingWithdrawalsBone[msg.sender];
-        if (pendingAmount < ENTRY_FEE_BONE) revert LowWinnings();
+        if (pendingAmount < entryFeeBone) revert LowWinnings();
 
-        pendingWithdrawalsBone[msg.sender] -= uint128(ENTRY_FEE_BONE);
+        pendingWithdrawalsBone[msg.sender] -= uint128(entryFeeBone);
         _addPlayerToRound(msg.sender, currentChainSelector, true, false, true);
 
-        emit ReEntry(msg.sender, ENTRY_FEE_BONE, currentRoundId);
         emit Enter(msg.sender, currentChainSelector, false);
     }
 
@@ -442,23 +418,18 @@ contract VRFLottery is
 
         if (!ethValid || !poolValid) revert BadPrice();
 
-        uint256 baseRequired = ENTRY_FEE_BONE / poolBonePerETH;
+        uint256 baseRequired = entryFeeBone / poolBonePerETH;
         uint256 ethWithSlippage = (baseRequired * (10000 + baseSlippage)) /
             10000;
         uint256 optimalAmount = (ethWithSlippage * 12000) / 10000;
 
-        if (optimalAmount > 2 ether) optimalAmount = 2 ether;
-        if (optimalAmount < 0.01 ether) optimalAmount = 0.01 ether;
-
         if (msg.value < optimalAmount) revert LowETH();
-
-        emit PriceUpd(ethValid ? 1 : 0, poolBonePerETH, optimalAmount);
 
         uint256 initialBoneBalance = boneToken.balanceOf(address(this));
         uint256 ethUsed;
         bool swapSucceeded = false;
 
-        try this._performSwap(ENTRY_FEE_BONE, optimalAmount) returns (
+        try this._performSwap(entryFeeBone, optimalAmount) returns (
             uint256 _ethUsed
         ) {
             ethUsed = _ethUsed;
@@ -466,7 +437,7 @@ contract VRFLottery is
 
             uint256 finalBoneBalance = boneToken.balanceOf(address(this));
             require(
-                finalBoneBalance >= initialBoneBalance + ENTRY_FEE_BONE,
+                finalBoneBalance >= initialBoneBalance + entryFeeBone,
                 "Low BONE"
             );
         } catch {
@@ -486,13 +457,6 @@ contract VRFLottery is
 
         _addPlayerToRound(msg.sender, currentChainSelector, true, true, false);
 
-        emit Swapped(
-            msg.sender,
-            msg.value,
-            ethUsed,
-            ethToRefund,
-            ENTRY_FEE_BONE
-        );
         emit Enter(msg.sender, currentChainSelector, true);
     }
 
@@ -508,13 +472,10 @@ contract VRFLottery is
             return (0, false, "ETH entry unavailable - use BONE");
         }
 
-        uint256 baseRequired = ENTRY_FEE_BONE / poolBonePerETH;
+        uint256 baseRequired = entryFeeBone / poolBonePerETH;
         uint256 ethWithSlippage = (baseRequired * (10000 + baseSlippage)) /
             10000;
         optimalAmount = (ethWithSlippage * 12000) / 10000;
-
-        if (optimalAmount > 2 ether) optimalAmount = 2 ether;
-        if (optimalAmount < 0.01 ether) optimalAmount = 0.01 ether;
 
         available = true;
         message = "Auto-optimal amount";
@@ -575,19 +536,15 @@ contract VRFLottery is
     }
 
     function _adjustSlippage(bool swapSucceeded, uint256, uint256) internal {
-        uint256 oldSlippage = baseSlippage;
-
         if (swapSucceeded) {
-            if (baseSlippage > MIN_SLIPPAGE + 100) {
-                baseSlippage -= 100;
+            if (baseSlippage > MIN_SLIPPAGE + 300) {
+                baseSlippage -= 50;
             }
-            emit SlippageAdj(oldSlippage, baseSlippage, "Success");
         } else {
             baseSlippage += 200;
             if (baseSlippage > MAX_SLIPPAGE) {
                 baseSlippage = MAX_SLIPPAGE;
             }
-            emit SlippageAdj(oldSlippage, baseSlippage, "Failure");
         }
     }
 
@@ -617,9 +574,9 @@ contract VRFLottery is
         round.players.push(newPlayer);
 
         unchecked {
-            round.totalPrizePoolBone += uint128(ENTRY_FEE_BONE);
+            round.totalPrizePoolBone += uint128(entryFeeBone);
             ++round.chainPlayerCounts[sourceChain];
-            round.chainPrizePools[sourceChain] += uint128(ENTRY_FEE_BONE);
+            round.chainPrizePools[sourceChain] += uint128(entryFeeBone);
             ++entriesCount[player];
             playerPoints[player] += POINTS_PER_ENTRY;
         }
@@ -663,7 +620,6 @@ contract VRFLottery is
 
         round.state = RoundState.VRFRequested;
         round.vrfRequestId = requestId;
-        emit VRFReq(requestId, currentRoundId);
     }
 
     function fulfillRandomWords(
@@ -685,8 +641,6 @@ contract VRFLottery is
 
         _distributePrizesInternal(roundId);
         _completeRoundInternal(roundId);
-
-        emit Cycle(roundId);
     }
 
     function _selectWinnersOnly(
@@ -791,7 +745,6 @@ contract VRFLottery is
         }
 
         round.state = RoundState.PrizesDistributed;
-        emit Prizes(roundId, totalPrize);
     }
 
     function completeRound(uint256 roundId) external {
@@ -808,7 +761,6 @@ contract VRFLottery is
             100;
         if (burnAmount > 0) {
             burnData.totalBoneForBurn += burnAmount;
-            emit BurnAcc(burnAmount, burnData.totalBoneForBurn);
         }
 
         _notifyCrossChainWinners(roundId);
@@ -821,9 +773,6 @@ contract VRFLottery is
             LotteryRound storage newRound = lotteryRounds[currentRoundId];
             newRound.state = RoundState.Active;
             newRound.startTime = uint64(block.timestamp);
-
-            emit Complete(roundId, currentRoundId);
-            emit NewRound(currentRoundId);
         }
     }
 
@@ -854,8 +803,6 @@ contract VRFLottery is
                     ++burnData.burnCount;
                 }
                 burnData.lastBurnTimestamp = block.timestamp;
-
-                emit TOADBurn(toadReceived, msg.sender);
             }
         } catch {
             burnData.totalBoneForBurn += boneAmount;
@@ -889,7 +836,6 @@ contract VRFLottery is
         );
 
         toadReceived = amounts[amounts.length - 1];
-        emit TOADBuy(boneAmount, toadReceived, toadBurnRoute);
 
         return toadReceived;
     }
@@ -900,44 +846,6 @@ contract VRFLottery is
     }
 
     // ===== UPDATED CCIP FUNCTIONS =====
-    function _sendEntryResponse(
-        address player,
-        bool approved,
-        string memory reason,
-        uint64 destinationChain,
-        address destinationContract
-    ) internal {
-        bytes memory data = abi.encode(
-            uint8(MessageType.ENTRY_RESPONSE),
-            currentRoundId, // Include current round for sync
-            player,
-            approved,
-            reason
-        );
-
-        Client.EVM2AnyMessage memory ccipMessage = Client.EVM2AnyMessage({
-            receiver: abi.encode(destinationContract),
-            data: data,
-            tokenAmounts: new Client.EVMTokenAmount[](0),
-            extraArgs: Client._argsToBytes(
-                Client.EVMExtraArgsV1({gasLimit: 200000})
-            ),
-            feeToken: address(0)
-        });
-
-        try
-            IRouterClient(i_ccipRouter).ccipSend{
-                value: IRouterClient(i_ccipRouter).getFee(
-                    destinationChain,
-                    ccipMessage
-                )
-            }(destinationChain, ccipMessage)
-        {
-            // Success
-        } catch {
-            emit CCIPFail(player, destinationChain, "Entry response failed");
-        }
-    }
 
     function _notifyCrossChainWinners(uint256 roundId) internal {
         LotteryRound storage round = lotteryRounds[roundId];
@@ -964,14 +872,15 @@ contract VRFLottery is
             address contractAddress = chainContracts[chainSelector];
 
             if (contractAddress != address(0)) {
+                // Send only winners, not all players
                 bytes memory data = abi.encode(
                     uint8(MessageType.WINNERS_NOTIFICATION),
                     roundId,
                     round.winners,
                     round.totalPrizePoolBone,
-                    thisChainContribution, // This chain's contribution
-                    chains, // All chain selectors
-                    contributions // All chain contributions
+                    thisChainContribution,
+                    chains,
+                    contributions
                 );
 
                 Client.EVM2AnyMessage memory ccipMessage = Client
@@ -980,7 +889,7 @@ contract VRFLottery is
                         data: data,
                         tokenAmounts: new Client.EVMTokenAmount[](0),
                         extraArgs: Client._argsToBytes(
-                            Client.EVMExtraArgsV1({gasLimit: 400000})
+                            Client.EVMExtraArgsV1({gasLimit: ccipGasLimit})
                         ),
                         feeToken: address(0)
                     });
@@ -1069,16 +978,22 @@ contract VRFLottery is
         uint64 sourceChain
     ) internal {
         bool hasNFT = nftContract.balanceOf(player) > 0;
-        string memory reason = hasNFT ? "OK" : "No NFT";
-        address targetContract = chainContracts[sourceChain];
+        bool accepted = false;
+        string memory reason = "";
 
-        if (hasNFT && boneAmount == ENTRY_FEE_BONE) {
+        if (!hasNFT) {
+            reason = "No NFT owned";
+        } else if (boneAmount != entryFeeBone) {
+            reason = "Incorrect entry fee";
+        } else {
             LotteryRound storage round = lotteryRounds[currentRoundId];
 
-            if (
-                round.state == RoundState.Active &&
-                round.players.length < MAX_PLAYERS
-            ) {
+            if (round.state != RoundState.Active) {
+                reason = "Round not active";
+            } else if (round.players.length >= MAX_PLAYERS) {
+                reason = "Round full";
+            } else {
+                // Check for duplicate
                 bool isDuplicate = false;
                 for (uint256 i = 0; i < round.players.length; i++) {
                     if (round.players[i].playerAddress == player) {
@@ -1087,39 +1002,66 @@ contract VRFLottery is
                     }
                 }
 
-                if (!isDuplicate) {
-                    _addPlayerToRound(player, sourceChain, false, false, false);
-
-                    if (targetContract != address(0)) {
-                        _sendEntryResponse(
-                            player,
-                            true,
-                            "OK",
-                            sourceChain,
-                            targetContract
-                        );
-                    }
-
-                    emit CrossEntry(player, sourceChain);
-                    return;
+                if (isDuplicate) {
+                    reason = "Already entered";
                 } else {
-                    reason = "Duplicate";
+                    // SUCCESS - Add player and send success response
+                    _addPlayerToRound(player, sourceChain, false, false, false);
+                    emit CrossEntry(player, sourceChain);
+                    accepted = true;
+                    reason = "Entry accepted";
                 }
-            } else {
-                reason = round.state != RoundState.Active
-                    ? "Not active"
-                    : "Full";
             }
         }
 
-        if (targetContract != address(0)) {
-            _sendEntryResponse(
-                player,
-                false,
-                reason,
-                sourceChain,
-                targetContract
-            );
+        // Send verification response back to cross-chain contract
+        _sendVerificationResponse(player, sourceChain, accepted, reason);
+
+        emit EntryResponse(player, sourceChain, accepted, reason);
+    }
+
+    function _sendVerificationResponse(
+        address player,
+        uint64 sourceChain,
+        bool accepted,
+        string memory reason
+    ) internal {
+        address contractAddress = chainContracts[sourceChain];
+
+        if (contractAddress == address(0)) {
+            emit CCIPFail(player, sourceChain, "Chain contract not set");
+            return;
+        }
+
+        bytes memory data = abi.encode(
+            uint8(MessageType.ENTRY_RESPONSE),
+            currentRoundId,
+            player,
+            accepted,
+            reason
+        );
+
+        Client.EVM2AnyMessage memory ccipMessage = Client.EVM2AnyMessage({
+            receiver: abi.encode(contractAddress),
+            data: data,
+            tokenAmounts: new Client.EVMTokenAmount[](0),
+            extraArgs: Client._argsToBytes(
+                Client.EVMExtraArgsV1({gasLimit: ccipGasLimit})
+            ),
+            feeToken: address(0)
+        });
+
+        try
+            IRouterClient(i_ccipRouter).ccipSend{
+                value: IRouterClient(i_ccipRouter).getFee(
+                    sourceChain,
+                    ccipMessage
+                )
+            }(sourceChain, ccipMessage)
+        {
+            // Response sent successfully
+        } catch {
+            emit CCIPFail(player, sourceChain, "Response send failed");
         }
     }
 
@@ -1142,12 +1084,6 @@ contract VRFLottery is
         newRound.startTime = uint64(block.timestamp);
 
         emit RoundSync(oldRound, newRoundId);
-        emit NewRound(currentRoundId);
-    }
-
-    function fundCCIPResponses() external payable {
-        require(msg.value > 0, "Need ETH");
-        emit CCIPFund(msg.sender, msg.value);
     }
 
     function getCCIPResponseCosts()
@@ -1195,19 +1131,6 @@ contract VRFLottery is
             (winnersNotificationCost * configuredChains.length);
     }
 
-    // ===== NEW VIEW FUNCTIONS =====
-    // function canEnterWithETH() external view returns (bool available, string memory status) {
-    //     (, bool valid) = _calculateETHRequired();
-
-    //     if (valid) {
-    //         available = true;
-    //         status = "ETH OK";
-    //     } else {
-    //         available = false;
-    //         status = "ETH unavailable";
-    //     }
-    // }
-
     function getCurrentRoundPlayers() external view returns (Player[] memory) {
         return lotteryRounds[currentRoundId].players;
     }
@@ -1254,6 +1177,14 @@ contract VRFLottery is
         roundId = request.roundId;
     }
 
+    function setCCIPGasLimit(uint32 newGasLimit) external onlyAdmin {
+        require(
+            newGasLimit >= 100000 && newGasLimit <= 1000000,
+            "Invalid gas limit"
+        );
+        ccipGasLimit = newGasLimit;
+    }
+
     function getRoundVRFRequestId(
         uint256 roundId
     ) external view returns (uint256 requestId) {
@@ -1269,71 +1200,41 @@ contract VRFLottery is
         return valid ? ethRequired : 0;
     }
 
-    // function getPoolPriceInfo() external view returns (uint160 sqrtPriceX96, uint256 bonePerEth, uint256 ethNeededForEntry, bool poolExists) {
-    //     (sqrtPriceX96,,,) = poolManager.getSlot0(boneEthPoolKey.toId());
-    //     poolExists = sqrtPriceX96 > 0;
-    //     (bonePerEth, ) = _getBonePriceFromPool();
+    function getWinnerShareFromChain(
+        uint256 roundId,
+        address winner
+    ) external view returns (uint256) {
+        LotteryRound storage round = lotteryRounds[roundId];
 
-    //     (uint256 ethRequired, bool calcValid) = _calculateETHRequired();
-    //     ethNeededForEntry = calcValid ? ethRequired : 0;
-    // }
+        // Check if address is a winner
+        bool isWinner = false;
+        for (uint256 i = 0; i < 3; i++) {
+            if (round.winners[i] == winner) {
+                isWinner = true;
+                break;
+            }
+        }
 
-    // function getChainContributions(uint256 roundId) external view returns (
-    //     uint64[] memory chains,
-    //     uint128[] memory contributions,
-    //     uint128 localContribution
-    // ) {
-    //     LotteryRound storage round = lotteryRounds[roundId];
-    //     uint256 chainCount = configuredChains.length;
+        if (!isWinner || round.totalPrizePoolBone == 0) return 0;
 
-    //     chains = new uint64[](chainCount);
-    //     contributions = new uint128[](chainCount);
+        // Calculate local contribution
+        uint256 localContribution = round.totalPrizePoolBone;
+        for (uint256 i = 0; i < configuredChains.length; i++) {
+            localContribution -= round.chainPrizePools[configuredChains[i]];
+        }
 
-    //     localContribution = round.totalPrizePoolBone;
-
-    //     for (uint256 i = 0; i < chainCount; i++) {
-    //         uint64 chainSelector = configuredChains[i];
-    //         chains[i] = chainSelector;
-    //         contributions[i] = round.chainPrizePools[chainSelector];
-    //         localContribution -= contributions[i];
-    //     }
-    // }
-
-    // function getWinnerShareFromChain(uint256 roundId, address winner) external view returns (uint256) {
-    //     LotteryRound storage round = lotteryRounds[roundId];
-
-    //     // Check if address is a winner
-    //     bool isWinner = false;
-    //     for (uint256 i = 0; i < 3; i++) {
-    //         if (round.winners[i] == winner) {
-    //             isWinner = true;
-    //             break;
-    //         }
-    //     }
-
-    //     if (!isWinner || round.totalPrizePoolBone == 0) return 0;
-
-    //     // Calculate local contribution
-    //     uint256 localContribution = round.totalPrizePoolBone;
-    //     for (uint256 i = 0; i < configuredChains.length; i++) {
-    //         localContribution -= round.chainPrizePools[configuredChains[i]];
-    //     }
-
-    //     // Calculate winner's share from this chain
-    //     uint256 localWinnersTotal = (localContribution * WINNERS_SHARE) / 100;
-    //     return localWinnersTotal / 3;
-    // }
+        // Calculate winner's share from this chain
+        uint256 localWinnersTotal = (localContribution * WINNERS_SHARE) / 100;
+        return localWinnersTotal / 3;
+    }
 
     // ===== ADMIN FUNCTIONS =====
     function updatePoolKey(PoolKey memory _newPoolKey) external onlyAdmin {
         boneEthPoolKey = _newPoolKey;
-        emit PoolUpd(_newPoolKey);
     }
 
     function resetSlippage() external onlyAdmin {
-        uint256 oldSlippage = baseSlippage;
         baseSlippage = 2500;
-        emit SlippageAdj(oldSlippage, baseSlippage, "Reset");
     }
 
     function emergencySelectWinners(uint256 roundId) external onlyAdmin {
@@ -1364,17 +1265,23 @@ contract VRFLottery is
         _selectWinnersOnly(roundId, randomWords);
     }
 
-    // function emergencyWithdrawTokens(address token, uint256 amount) external onlyAdmin {
-    //     require(token != address(boneToken) || amount <= boneToken.balanceOf(address(this)) / 10, "Max 10% BONE");
-    //     IERC20(token).transfer(contractAdmin, amount);
-    // }
+    function emergencyWithdrawTokens(
+        address token,
+        uint256 amount
+    ) external onlyAdmin {
+        require(
+            token != address(boneToken) ||
+                amount <= boneToken.balanceOf(address(this)) / 30,
+            "Max 10% BONE"
+        );
+        IERC20(token).transfer(contractAdmin, amount);
+    }
 
-    // function emergencyWithdrawETH() external onlyAdmin {
-    //     uint256 balance = address(this).balance;
-    //     (bool success,) = contractAdmin.call{value: balance}("");
-    //     require(success, "ETH fail");
-    //     emit ETHOut(contractAdmin, balance);
-    // }
+    function emergencyWithdrawETH() external onlyAdmin {
+        uint256 balance = address(this).balance;
+        (bool success, ) = contractAdmin.call{value: balance}("");
+        require(success, "ETH fail");
+    }
 
     function setVRFConfig(
         uint32 _callbackGasLimit,
@@ -1385,6 +1292,14 @@ contract VRFLottery is
             (_callbackGasLimit << 8) |
             (_requestConfirmations << 4) |
             _numWords;
+    }
+
+    function setEntryFee(uint256 newEntryFee) external onlyAdmin {
+        require(newEntryFee > 0, "Entry fee must be positive");
+        require(newEntryFee <= 1000 ether, "Entry fee too high");
+
+        uint256 oldFee = entryFeeBone;
+        entryFeeBone = newEntryFee;
     }
 
     function pauseContract() external onlyAdmin {
@@ -1426,59 +1341,50 @@ contract VRFLottery is
         }
     }
 
-    function emergencySendEntryResponse(
-        address player,
-        bool approved,
-        string memory reason,
+    function emergencyNotifyWinners(
+        uint256 roundId,
         uint64 destinationChain
     ) external onlyAdmin {
+        LotteryRound storage round = lotteryRounds[roundId];
         address contractAddress = chainContracts[destinationChain];
         require(contractAddress != address(0), "Chain not set");
 
-        _sendEntryResponse(
-            player,
-            approved,
-            reason,
-            destinationChain,
-            contractAddress
+        // Build single chain data for emergency notification
+        uint64[] memory chains = new uint64[](1);
+        uint128[] memory contributions = new uint128[](1);
+        chains[0] = currentChainSelector;
+        contributions[0] = round.totalPrizePoolBone;
+
+        // Send only winners data - no allPlayers array
+        bytes memory data = abi.encode(
+            uint8(MessageType.WINNERS_NOTIFICATION),
+            roundId,
+            round.winners,
+            round.totalPrizePoolBone,
+            round.totalPrizePoolBone,
+            chains,
+            contributions
         );
+
+        Client.EVM2AnyMessage memory ccipMessage = Client.EVM2AnyMessage({
+            receiver: abi.encode(contractAddress),
+            data: data,
+            tokenAmounts: new Client.EVMTokenAmount[](0),
+            extraArgs: Client._argsToBytes(
+                Client.EVMExtraArgsV1({gasLimit: ccipGasLimit})
+            ),
+            feeToken: address(0)
+        });
+
+        IRouterClient(i_ccipRouter).ccipSend{
+            value: IRouterClient(i_ccipRouter).getFee(
+                destinationChain,
+                ccipMessage
+            )
+        }(destinationChain, ccipMessage);
+
+        emit WinNotify(destinationChain, roundId);
     }
-
-    // function emergencyNotifyWinners(uint256 roundId, uint64 destinationChain) external onlyAdmin {
-    //     LotteryRound storage round = lotteryRounds[roundId];
-    //     address contractAddress = chainContracts[destinationChain];
-    //     require(contractAddress != address(0), "Chain not set");
-
-    //     // Build single chain data for emergency notification
-    //     uint64[] memory chains = new uint64[](1);
-    //     uint128[] memory contributions = new uint128[](1);
-    //     chains[0] = currentChainSelector;
-    //     contributions[0] = round.totalPrizePoolBone;
-
-    //     bytes memory data = abi.encode(
-    //         uint8(MessageType.WINNERS_NOTIFICATION),
-    //         roundId,
-    //         round.winners,
-    //         round.totalPrizePoolBone,
-    //         round.totalPrizePoolBone,
-    //         chains,
-    //         contributions
-    //     );
-
-    //     Client.EVM2AnyMessage memory ccipMessage = Client.EVM2AnyMessage({
-    //         receiver: abi.encode(contractAddress),
-    //         data: data,
-    //         tokenAmounts: new Client.EVMTokenAmount[](0),
-    //         extraArgs: Client._argsToBytes(Client.EVMExtraArgsV1({gasLimit: 400000})),
-    //         feeToken: address(0)
-    //     });
-
-    //     IRouterClient(i_ccipRouter).ccipSend{
-    //         value: IRouterClient(i_ccipRouter).getFee(destinationChain, ccipMessage)
-    //     }(destinationChain, ccipMessage);
-
-    //     emit WinNotify(destinationChain, roundId);
-    // }
 
     function forceRoundSync(uint256 newRoundId) external onlyAdmin {
         if (newRoundId > currentRoundId) {
@@ -1486,8 +1392,5 @@ contract VRFLottery is
         }
     }
 
-    // ===== FALLBACK FUNCTIONS =====
-    receive() external payable {
-        // Allow ETH deposits for swaps, refunds, and CCIP operations
-    }
+    receive() external payable {}
 }
